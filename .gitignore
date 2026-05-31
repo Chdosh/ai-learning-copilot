@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+app/data/app.db
+app/data/app.db-*
+app/data/screenshots/*
+!app/data/screenshots/.gitkeep
+.env
+*.log
+
+# Keep the source repository light. Ship portable OCR through releases/installers later.
+vendor/tesseract/*
+!vendor/tesseract/README.md
+!vendor/tesseract/tessdata/
+vendor/tesseract/tessdata/*
+!vendor/tesseract/tessdata/.gitkeep
