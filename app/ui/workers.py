@@ -6,6 +6,7 @@ import json
 from PySide6.QtCore import QThread, Signal
 
 from app.services.ai_client import AIClient, AIClientError, AIResult
+from app.services.categorizer import auto_categorize
 from app.services.history_store import HistoryStore
 from app.services.ocr import OCRError, OCRService
 from app.services.settings import AppSettings
@@ -70,12 +71,14 @@ class CapturePipelineWorker(QThread):
             except OSError:
                 stored_image_path = self.image_path
 
+        category = auto_categorize(source_text, result.tags)
         capture_id = self.history_store.save_capture(
             image_path=stored_image_path,
             source_text=source_text,
             translation=result.translation,
             explanation=result.explanation,
             tags=result.tags,
+            category=category,
         )
         self.history_store.upsert_terms(term_dicts)
         conversation_id = self.history_store.create_conversation(
@@ -111,6 +114,7 @@ class CapturePipelineWorker(QThread):
                 "explanation": result.explanation,
                 "terms": term_dicts,
                 "tags": result.tags,
+                "category": category,
                 "learning_tip": result.learning_tip,
             }
         )

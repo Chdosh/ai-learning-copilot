@@ -34,12 +34,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.paths import DATA_DIR, ensure_app_dirs
+from app.paths import DATA_DIR, DB_PATH, ensure_app_dirs
+from app.services.categorizer import get_all_categories
 from app.services.history_store import CaptureRecord, HistoryStore, TermRecord
 from app.services.ocr import OCRService
 from app.services.screenshot import HotkeyManager, ScreenshotSelector
 from app.services.settings import AppSettings, SettingsService
 from app.ui.result_window import ResultWindow
+from app.ui.statistics_widgets import BarChartWidget, HeatmapWidget, PieChartWidget, StatCard
 from app.ui.theme import APP_STYLE, BLUE, BLUE_SOFT, BORDER, GREEN, MUTED, RED
 from app.ui.workers import CapturePipelineWorker, FollowupWorker, TextExplainWorker
 
@@ -64,6 +66,7 @@ class MainWindow(QMainWindow):
         self._history_records: list[CaptureRecord] = []
         self._terms_records: list[TermRecord] = []
         self._last_payload: dict = {}
+        self._active_history_filter: str = "全部"
         self.ui_font_size = 13
 
         self.result_window = ResultWindow(self.history_store)
@@ -78,6 +81,7 @@ class MainWindow(QMainWindow):
         self._start_hotkey()
         self.refresh_history()
         self.refresh_terms()
+        self.refresh_statistics()
         self.refresh_ocr_status()
 
     def start_capture(self) -> None:
@@ -111,9 +115,71 @@ class MainWindow(QMainWindow):
         self.followup_worker.finished.connect(self.followup_worker.deleteLater)
         self.followup_worker.start()
 
+    def _apply_history_filter(self, label: str) -> None:
+        self._active_history_filter = label
+        for name, chip in self.history_filter_chips.items():
+            chip.setChecked(name == label)
+            if name == label:
+                chip.setObjectName("primaryButton")
+                chip.setStyleSheet("")
+            else:
+                chip.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background: #ffffff;
+                        border: 1px solid {BORDER};
+                        border-radius: 17px;
+                        padding: 7px 16px;
+                        color: #344054;
+                    }}
+                    """
+                )
+        self.refresh_history()
+
     def refresh_history(self) -> None:
         query = self.history_search.text().strip() if hasattr(self, "history_search") else ""
-        records = self.history_store.search_captures(query=query, limit=200)
+        filter_label = getattr(self, "_active_history_filter", "全部")
+
+        date_from = ""
+        date_to = ""
+        has_followup = False
+        has_category = False
+
+        from datetime import datetime, timedelta
+
+        if filter_label == "今天":
+            date_from = datetime.now().strftime("%Y-%m-%d")
+            date_to = date_from + "T23:59:59"
+        elif filter_label == "本周":
+            today = datetime.now()
+            week_start = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
+            date_from = week_start
+            date_to = today.strftime("%Y-%m-%d") + "T23:59:59"
+        elif filter_label == "本月":
+            date_from = datetime.now().strftime("%Y-%m-01")
+            date_to = datetime.now().strftime("%Y-%m-%d") + "T23:59:59"
+        elif filter_label == "有追问":
+            has_followup = True
+        elif filter_label == "有分类":
+            has_category = True
+
+        if filter_label in ("全部", "今天", "本周", "本月"):
+            records = self.history_store.search_captures(query=query, limit=200)
+            if filter_label != "全部":
+                records = [
+                    r for r in records
+                    if self._match_filter(r, filter_label)
+                ]
+        else:
+            records = self.history_store.search_captures_advanced(
+                query=query,
+                date_from=date_from,
+                date_to=date_to,
+                has_followup=has_followup,
+                has_category=has_category,
+                limit=200,
+            )
+
         self._history_records = records
         self.history_list.clear()
         for record in records:
@@ -126,9 +192,29 @@ class MainWindow(QMainWindow):
             self.history_list.setCurrentRow(0)
         self.history_count_label.setText(f"共 {len(records)} 条记录")
         self.sidebar_stats_label.setText(
-            f"今日学习统计\n\n截图        {len(records)}\n追问        {_count_followups_hint(records)}\n术语        {len(self._terms_records)}"
+            f"学习统计\n\n截图    {len(records)}\n术语    {len(self._terms_records)}\n收藏    {sum(1 for t in self._terms_records if t.favorite)}"
         )
-        self.status_label.setText(f"历史记录：{len(records)} 条")
+        filter_desc = f" | 筛选: {filter_label}" if filter_label != "全部" else ""
+        self.status_label.setText(f"历史记录：{len(records)} 条{filter_desc}")
+
+    @staticmethod
+    def _match_filter(record: CaptureRecord, filter_label: str) -> bool:
+        from datetime import datetime, timedelta
+        try:
+            record_date = record.created_at[:10]
+        except (IndexError, TypeError):
+            return False
+        today = datetime.now()
+        if filter_label == "全部":
+            return True
+        elif filter_label == "今天":
+            return record_date == today.strftime("%Y-%m-%d")
+        elif filter_label == "本周":
+            week_start = (today - timedelta(days=today.weekday())).strftime("%Y-%m-%d")
+            return record_date >= week_start
+        elif filter_label == "本月":
+            return record_date >= today.strftime("%Y-%m-01")
+        return True
 
     def refresh_terms(self) -> None:
         query = self.terms_search.text().strip() if hasattr(self, "terms_search") else ""
@@ -141,6 +227,7 @@ class MainWindow(QMainWindow):
                 term.chinese_name or "-",
                 _term_keywords(term),
                 str(term.review_count),
+                "★" if term.favorite else "",
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
@@ -153,8 +240,9 @@ class MainWindow(QMainWindow):
             self.terms_table.selectRow(0)
         self.terms_count_label.setText(f"共 {len(terms)} 条术语")
         if hasattr(self, "sidebar_stats_label"):
+            fav_count = sum(1 for t in terms if t.favorite)
             self.sidebar_stats_label.setText(
-                f"今日学习统计\n\n截图        {len(self._history_records)}\n追问        {_count_followups_hint(self._history_records)}\n术语        {len(terms)}"
+                f"学习统计\n\n截图    {len(self._history_records)}\n术语    {len(terms)}\n收藏    {fav_count}"
             )
 
     def save_settings(self) -> None:
@@ -218,6 +306,7 @@ class MainWindow(QMainWindow):
         self._add_page(sidebar_layout, "▤  结果/大窗口", self._build_result_page())
         self._add_page(sidebar_layout, "◴  历史记录", self._build_history_page())
         self._add_page(sidebar_layout, "▣  术语本", self._build_terms_page())
+        self._add_page(sidebar_layout, "◔  数据统计", self._build_statistics_page())
         self._add_page(sidebar_layout, "⚙  设置", self._build_settings_page())
 
         export_button = _side_action("⇩  导出 Markdown")
@@ -236,7 +325,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addLayout(font_row)
         sidebar_layout.addStretch()
 
-        self.sidebar_stats_label = QLabel("今日学习统计\n\n截图        0\n追问        0\n术语        0")
+        self.sidebar_stats_label = QLabel("学习统计\n\n截图    0\n术语    0\n收藏    0")
         self.sidebar_stats_label.setObjectName("sidebarCard")
         self.sidebar_stats_label.setStyleSheet(
             f"""
@@ -325,6 +414,8 @@ class MainWindow(QMainWindow):
         elif index == 4:
             self.refresh_terms()
         elif index == 5:
+            self.refresh_statistics()
+        elif index == 6:
             self.refresh_ocr_status()
 
     def _build_home_page(self) -> QWidget:
@@ -377,6 +468,26 @@ class MainWindow(QMainWindow):
             ),
             1,
             1,
+        )
+        cards.addWidget(
+            _feature_card(
+                "数据统计",
+                "查看学习趋势、分类分布、活跃度热力图等统计信息。",
+                "查看统计",
+                lambda: self._switch_page(5),
+            ),
+            1,
+            1,
+        )
+        cards.addWidget(
+            _feature_card(
+                "个人数据库",
+                "备份、恢复、清理本地 SQLite 数据库，导出 Anki 词表。",
+                "数据管理",
+                lambda: self._switch_page(5),
+            ),
+            2,
+            0,
         )
         layout.addLayout(cards)
         layout.addStretch()
@@ -469,8 +580,14 @@ class MainWindow(QMainWindow):
         search_button = _ghost_button("筛选")
         search_button.clicked.connect(self.refresh_history)
         filters_layout.addWidget(search_button)
-        for label in ("今天", "本周", "有追问", "已收藏", "全部标签"):
-            filters_layout.addWidget(_chip(label, active=(label == "今天")))
+
+        self.history_filter_chips: dict[str, QPushButton] = {}
+        chip_labels = ["全部", "今天", "本周", "本月", "有追问", "有分类"]
+        for label in chip_labels:
+            chip = _chip(label, active=(label == "全部"))
+            chip.clicked.connect(lambda checked=False, l=label: self._apply_history_filter(l))
+            self.history_filter_chips[label] = chip
+            filters_layout.addWidget(chip)
         layout.addWidget(filters)
 
         content = QHBoxLayout()
@@ -520,6 +637,9 @@ class MainWindow(QMainWindow):
         self.history_tags_label = QLabel("标签：无")
         self.history_tags_label.setStyleSheet(f"color:{MUTED};")
         detail_layout.addWidget(self.history_tags_label)
+        self.history_category_label = QLabel("分类：-")
+        self.history_category_label.setStyleSheet(f"color:{MUTED};")
+        detail_layout.addWidget(self.history_category_label)
 
         content.addWidget(list_card, 4)
         content.addWidget(detail_card, 6)
@@ -556,8 +676,8 @@ class MainWindow(QMainWindow):
         table_card = _card()
         table_layout = QVBoxLayout(table_card)
         table_layout.setContentsMargins(0, 0, 0, 12)
-        self.terms_table = QTableWidget(0, 4)
-        self.terms_table.setHorizontalHeaderLabels(["术语", "中文名", "关键词", "次数"])
+        self.terms_table = QTableWidget(0, 5)
+        self.terms_table.setHorizontalHeaderLabels(["术语", "中文名", "关键词", "次数", "收藏"])
         self.terms_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.terms_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.terms_table.verticalHeader().setVisible(False)
@@ -568,6 +688,7 @@ class MainWindow(QMainWindow):
         self.terms_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.terms_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.terms_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.terms_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         table_layout.addWidget(self.terms_table, 1)
         table_bottom = QHBoxLayout()
         self.terms_count_label = QLabel("共 0 条术语")
@@ -613,11 +734,11 @@ class MainWindow(QMainWindow):
         detail_layout.addWidget(self.term_count_label)
         detail_layout.addStretch()
         term_buttons = QHBoxLayout()
-        favorite_button = _ghost_button("☆ 收藏")
-        favorite_button.clicked.connect(self._show_favorite_hint)
+        self.favorite_button = _ghost_button("☆ 收藏")
+        self.favorite_button.clicked.connect(self._toggle_favorite)
         edit_button = _ghost_button("✎ 编辑")
         edit_button.clicked.connect(self._edit_selected_term)
-        term_buttons.addWidget(favorite_button)
+        term_buttons.addWidget(self.favorite_button)
         term_buttons.addWidget(edit_button)
         delete_button = _danger_button("删除")
         delete_button.clicked.connect(self._delete_selected_term)
@@ -633,6 +754,231 @@ class MainWindow(QMainWindow):
         layout.addWidget(foot)
         return page
 
+    def _build_statistics_page(self) -> QWidget:
+        page = _page()
+        outer_layout = QVBoxLayout(page)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(14)
+
+        header = QHBoxLayout()
+        header.addWidget(_title_block("数据统计", "查看你的学习数据统计、趋势和分析。"))
+        header.addStretch()
+        refresh_btn = _ghost_button("⟳  刷新")
+        refresh_btn.clicked.connect(self.refresh_statistics)
+        header.addWidget(refresh_btn)
+        layout.addLayout(header)
+
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(12)
+        self.stat_card_today = StatCard("今日截图", "0", "", BLUE)
+        self.stat_card_week = StatCard("本周截图", "0", "", GREEN)
+        self.stat_card_total = StatCard("总记录数", "0", "", "#6c5ce7")
+        self.stat_card_terms = StatCard("术语总数", "0", "", "#e17055")
+        self.stat_card_favorites = StatCard("收藏术语", "0", "", "#fdcb6e")
+        self.stat_card_ai = StatCard("AI 交互", "0", "", "#00b894")
+        for card in (
+            self.stat_card_today, self.stat_card_week, self.stat_card_total,
+            self.stat_card_terms, self.stat_card_favorites, self.stat_card_ai,
+        ):
+            cards_row.addWidget(card)
+        layout.addLayout(cards_row)
+
+        charts_row = QHBoxLayout()
+        charts_row.setSpacing(14)
+        self.category_pie = PieChartWidget("分类分布")
+        self.tag_bar = BarChartWidget("标签 TOP 10")
+        charts_row.addWidget(self.category_pie, 5)
+        charts_row.addWidget(self.tag_bar, 5)
+        layout.addLayout(charts_row)
+
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(14)
+        self.heatmap_widget = HeatmapWidget("近 90 天活跃度")
+        self.trend_bar = BarChartWidget("最近 7 天趋势")
+        bottom_row.addWidget(self.heatmap_widget, 4)
+        bottom_row.addWidget(self.trend_bar, 6)
+        layout.addLayout(bottom_row)
+        layout.addStretch()
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(10)
+        backup_btn = _ghost_button("⇩  备份数据库")
+        backup_btn.clicked.connect(self._backup_database)
+        restore_btn = _ghost_button("⇧  恢复数据库")
+        restore_btn.clicked.connect(self._restore_database)
+        cleanup_btn = _ghost_button("✗  清理旧记录")
+        cleanup_btn.clicked.connect(self._cleanup_old_records)
+        anki_btn = _ghost_button("⇩  导出 Anki 词表")
+        anki_btn.clicked.connect(self._export_anki)
+        vacuum_btn = _ghost_button("⚙  优化数据库")
+        vacuum_btn.clicked.connect(self._vacuum_database)
+        db_info_btn = _ghost_button("ⓘ  数据库信息")
+        db_info_btn.clicked.connect(self._show_database_info)
+        action_row.addWidget(backup_btn)
+        action_row.addWidget(restore_btn)
+        action_row.addWidget(cleanup_btn)
+        action_row.addWidget(anki_btn)
+        action_row.addWidget(vacuum_btn)
+        action_row.addWidget(db_info_btn)
+        action_row.addStretch()
+        layout.addLayout(action_row)
+
+        scroll.setWidget(scroll_content)
+        outer_layout.addWidget(scroll)
+        return page
+
+    def refresh_statistics(self) -> None:
+        stats = self.history_store.get_statistics()
+        self.stat_card_today.set_data(str(stats["today_captures"]), "今日")
+        self.stat_card_week.set_data(str(stats["week_captures"]), "本周")
+        self.stat_card_total.set_data(str(stats["total_captures"]), "累计")
+        self.stat_card_terms.set_data(str(stats["total_terms"]), "术语")
+        self.stat_card_favorites.set_data(str(stats["favorite_terms"]), "已收藏")
+        self.stat_card_ai.set_data(str(stats["total_conversations"]), "交互")
+
+        self.category_pie.set_data(stats["category_distribution"] or {"未分类": stats["total_captures"]})
+        self.tag_bar.set_data(dict(list(stats["tag_distribution"].items())[:10]))
+        self.heatmap_widget.set_data(stats["daily_activity"])
+
+        from datetime import datetime, timedelta
+        last_7_days = {}
+        today = datetime.now()
+        for i in range(6, -1, -1):
+            day = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            last_7_days[day[5:]] = stats["daily_activity"].get(day, 0)
+        self.trend_bar.set_data(last_7_days)
+
+        if hasattr(self, "sidebar_stats_label"):
+            self.sidebar_stats_label.setText(
+                f"学习统计\n\n今日截图    {stats['today_captures']}\n本周截图    {stats['week_captures']}\n本月截图    {stats['month_captures']}\n术语总数    {stats['total_terms']}\n收藏术语    {stats['favorite_terms']}"
+            )
+        self.status_label.setText(
+            f"数据统计已更新 | 累计 {stats['total_captures']} 条记录 | "
+            f"最后记录: {stats['last_capture_at'][:10] if stats['last_capture_at'] else '无'}"
+        )
+
+    def _backup_database(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "备份数据库", f"app-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db", "SQLite (*.db)"
+        )
+        if not path:
+            return
+        import shutil
+        try:
+            self.history_store.vacuum()
+            shutil.copy2(str(DB_PATH), path)
+            QMessageBox.information(self, "备份完成", f"数据库已备份到：\n{path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "备份失败", str(exc))
+
+    def _restore_database(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "恢复数据库", "", "SQLite (*.db *.sqlite *.sqlite3)")
+        if not path:
+            return
+        reply = QMessageBox.warning(
+            self, "确认恢复",
+            "恢复数据库将覆盖当前所有数据！\n请先备份当前数据。\n\n确认继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        import shutil
+        try:
+            shutil.copy2(path, str(DB_PATH))
+            QMessageBox.information(self, "恢复完成", "数据库已恢复。请重启应用以加载新数据。")
+        except Exception as exc:
+            QMessageBox.warning(self, "恢复失败", str(exc))
+
+    def _cleanup_old_records(self) -> None:
+        from PySide6.QtWidgets import QInputDialog
+        days, ok = QInputDialog.getItem(
+            self, "清理旧记录", "删除多少天前的记录？",
+            ["30 天", "60 天", "90 天", "180 天", "365 天"], 2, False,
+        )
+        if not ok:
+            return
+        n = int(days.split()[0])
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=n)).isoformat()
+        reply = QMessageBox.warning(
+            self, "确认清理",
+            f"将删除 {days} 前的所有记录（создан_at < {cutoff[:10]}）。\n不可恢复！\n\n确认继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        count = self.history_store.delete_captures_before(cutoff)
+        QMessageBox.information(self, "清理完成", f"已删除 {count} 条记录。")
+        self.refresh_statistics()
+        self.refresh_history()
+
+    def _export_anki(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出 Anki 词表", "anki-vocabulary.csv", "CSV (*.csv)"
+        )
+        if not path:
+            return
+        terms = self.history_store.list_terms(limit=1000)
+        import csv
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(["term", "chinese_name", "explanation", "examples", "review_count", "favorite"])
+                for term in terms:
+                    writer.writerow([
+                        term.term,
+                        term.chinese_name,
+                        term.beginner_explanation,
+                        "；".join(term.examples),
+                        term.review_count,
+                        "★" if term.favorite else "",
+                    ])
+            QMessageBox.information(self, "导出完成", f"已导出 {len(terms)} 个术语到：\n{path}\n\n可直接导入 Anki。")
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", str(exc))
+
+    def _vacuum_database(self) -> None:
+        try:
+            self.history_store.vacuum()
+            QMessageBox.information(self, "优化完成", "数据库已优化。")
+        except Exception as exc:
+            QMessageBox.warning(self, "优化失败", str(exc))
+
+    def _show_database_info(self) -> None:
+        import os
+        stats = self.history_store.get_statistics()
+        db_size = os.path.getsize(str(DB_PATH)) if os.path.exists(str(DB_PATH)) else 0
+        if db_size > 1024 * 1024:
+            size_str = f"{db_size / (1024*1024):.1f} MB"
+        elif db_size > 1024:
+            size_str = f"{db_size / 1024:.1f} KB"
+        else:
+            size_str = f"{db_size} B"
+        info = (
+            f"数据库路径: {DB_PATH}\n"
+            f"文件大小: {size_str}\n\n"
+            f"总记录数: {stats['total_captures']}\n"
+            f"术语总数: {stats['total_terms']}\n"
+            f"收藏术语: {stats['favorite_terms']}\n"
+            f"AI 交互: {stats['total_conversations']}\n"
+            f"今日截图: {stats['today_captures']}\n"
+            f"本周截图: {stats['week_captures']}\n"
+            f"本月截图: {stats['month_captures']}\n"
+            f"平均解释长度: {stats['avg_explanation_length']} 字\n"
+            f"最后记录: {stats['last_capture_at'] or '无'}"
+        )
+        QMessageBox.information(self, "数据库信息", info)
+
     def _build_settings_page(self) -> QWidget:
         page = _page()
         outer = QHBoxLayout(page)
@@ -640,48 +986,123 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
 
         settings_nav = QFrame()
-        settings_nav.setFixedWidth(250)
+        settings_nav.setFixedWidth(230)
         settings_nav.setStyleSheet(f"background:#ffffff; border-right:1px solid {BORDER};")
-        settings_nav_layout = QVBoxLayout(settings_nav)
-        settings_nav_layout.setContentsMargins(18, 28, 18, 18)
+        nav_layout = QVBoxLayout(settings_nav)
+        nav_layout.setContentsMargins(18, 28, 18, 18)
+        nav_layout.setSpacing(4)
         title = QLabel("⚙  设置")
-        title.setStyleSheet("font-size:26px; font-weight:800;")
-        settings_nav_layout.addWidget(title)
-        for label in ("▣  AI 配置", "⌗  OCR 配置", "⌨  快捷键", "▤  保存与导出", "ⓘ  关于"):
-            button = _nav_button(label)
-            button.setChecked(label.startswith("▣"))
-            settings_nav_layout.addWidget(button)
-        settings_nav_layout.addStretch()
-        settings_nav_layout.addWidget(QLabel("v2.0.0"))
+        title.setStyleSheet("font-size:22px; font-weight:800;")
+        nav_layout.addWidget(title)
+        nav_layout.addSpacing(10)
 
-        content_holder = QWidget()
-        content_layout = QVBoxLayout(content_holder)
-        content_layout.setContentsMargins(34, 28, 34, 18)
-        content_layout.setSpacing(14)
-        content_layout.addWidget(_title_block("设置", "配置 AI、OCR、快捷键与本地保存选项。"))
+        self.settings_pages = QStackedWidget()
+        self.settings_nav_buttons: list[QPushButton] = []
+        nav_labels = ["▣  AI 配置", "⌗  OCR 配置", "⌨  快捷键", "▤  保存与导出", "ⓘ  关于"]
+        for idx, label in enumerate(nav_labels):
+            btn = _nav_button(label)
+            btn.setChecked(idx == 0)
+            btn.clicked.connect(lambda checked=False, i=idx: self._switch_settings_page(i))
+            self.settings_nav_buttons.append(btn)
+            nav_layout.addWidget(btn)
+        nav_layout.addStretch()
+        nav_layout.addWidget(QLabel("v0.2.0"))
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        scroll_layout.setContentsMargins(0, 0, 0, 0)
-        scroll_layout.setSpacing(14)
+        self._build_settings_ai_page()
+        self._build_settings_ocr_page()
+        self._build_settings_hotkey_page()
+        self._build_settings_save_page()
+        self._build_settings_about_page()
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        test_button = _ghost_button("⟳  测试连接")
+        test_button.clicked.connect(self.refresh_ocr_status)
+        save_button = _primary_button("▣  保存设置")
+        save_button.clicked.connect(self.save_settings)
+        footer.addWidget(test_button)
+        footer.addWidget(save_button)
+        self.settings_pages.addWidget(self._settings_footer_wrap(footer))
+
+        outer.addWidget(settings_nav)
+        outer.addWidget(self.settings_pages, 1)
+        return page
+
+    def _settings_footer_wrap(self, footer: QHBoxLayout) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(34, 28, 34, 18)
+        layout.setSpacing(14)
+        layout.addWidget(self._current_settings_content)
+        layout.addLayout(footer)
+        return wrapper
+
+    def _switch_settings_page(self, index: int) -> None:
+        self.settings_pages.setCurrentIndex(index)
+        for i, btn in enumerate(self.settings_nav_buttons):
+            btn.setChecked(i == index)
+
+    def _build_settings_ai_page(self) -> None:
+        self._settings_ai_content = QWidget()
+        layout = QVBoxLayout(self._settings_ai_content)
+        layout.setContentsMargins(34, 28, 34, 18)
+        layout.setSpacing(14)
+        layout.addWidget(_title_block("AI 配置", "配置 OpenAI 兼容的 Chat Completions API。"))
 
         self.api_key_input = QLineEdit(self.settings.api_key)
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.base_url_input = QLineEdit(self.settings.base_url)
         self.model_input = QLineEdit(self.settings.model)
+
         ai_card = _settings_card(
-            "▣  AI 配置",
+            "API 设置",
             [
                 ("API Key", self.api_key_input),
                 ("Base URL", self.base_url_input),
                 ("模型名称", self.model_input),
             ],
-            "兼容 OpenAI 接口，可配置 DeepSeek 等纯文本模型。",
+            "兼容 OpenAI 接口，可配置 DeepSeek、Kimi、本地 Ollama 等。",
         )
-        scroll_layout.addWidget(ai_card)
+        layout.addWidget(ai_card)
+
+        hint_card = _card()
+        hint_layout = QVBoxLayout(hint_card)
+        hint_layout.setContentsMargins(18, 16, 18, 16)
+        hint_title = QLabel("常用配置参考")
+        hint_title.setStyleSheet("font-weight:800;")
+        hint_layout.addWidget(hint_title)
+        hints = [
+            "OpenAI: Base URL=https://api.openai.com/v1, model=gpt-4.1-mini",
+            "DeepSeek: Base URL=https://api.deepseek.com/v1, model=deepseek-chat",
+            "Kimi: Base URL=https://api.moonshot.cn/v1, model=moonshot-v1-8k",
+            "Ollama: Base URL=http://localhost:11434/v1, model=llama3",
+        ]
+        for hint in hints:
+            lbl = QLabel(f"• {hint}")
+            lbl.setStyleSheet(f"color:{MUTED};")
+            lbl.setWordWrap(True)
+            hint_layout.addWidget(lbl)
+        layout.addWidget(hint_card)
+        layout.addStretch()
+
+        self._settings_ai_footer = QHBoxLayout()
+        self._settings_ai_footer.addStretch()
+        test_btn = _ghost_button("⟳  测试连接")
+        test_btn.clicked.connect(self._test_ai_connection)
+        save_btn = _primary_button("▣  保存设置")
+        save_btn.clicked.connect(self.save_settings)
+        self._settings_ai_footer.addWidget(test_btn)
+        self._settings_ai_footer.addWidget(save_btn)
+        layout.addLayout(self._settings_ai_footer)
+
+        self.settings_pages.addWidget(self._settings_ai_content)
+
+    def _build_settings_ocr_page(self) -> None:
+        self._settings_ocr_content = QWidget()
+        layout = QVBoxLayout(self._settings_ocr_content)
+        layout.setContentsMargins(34, 28, 34, 18)
+        layout.setSpacing(14)
+        layout.addWidget(_title_block("OCR 配置", "配置 Tesseract 文字识别引擎。"))
 
         self.ocr_lang_input = QLineEdit(self.settings.ocr_lang)
         self.tesseract_path_input = QLineEdit(self.settings.tesseract_path)
@@ -698,7 +1119,7 @@ class MainWindow(QMainWindow):
         ocr_path_layout.addWidget(self.tesseract_path_input, 1)
         ocr_path_layout.addWidget(detect_button)
         ocr_card = _settings_card(
-            "⌗  OCR 配置",
+            "Tesseract 设置",
             [
                 ("OCR 引擎", QLabel("Tesseract（本地便携优先）")),
                 ("Tesseract 路径", ocr_path_row),
@@ -706,47 +1127,215 @@ class MainWindow(QMainWindow):
                 ("检测状态", self.ocr_status_label),
             ],
         )
-        scroll_layout.addWidget(ocr_card)
+        layout.addWidget(ocr_card)
+
+        lang_card = _card()
+        lang_layout = QVBoxLayout(lang_card)
+        lang_layout.setContentsMargins(18, 16, 18, 16)
+        lang_title = QLabel("语言包说明")
+        lang_title.setStyleSheet("font-weight:800;")
+        lang_layout.addWidget(lang_title)
+        lang_info = [
+            "默认: eng+chi_sim（英文+简体中文）",
+            "仅英文: eng",
+            "仅中文: chi_sim",
+            "英文+繁体: eng+chi_tra",
+            "更多语言包需放置到 vendor/tesseract/tessdata/ 目录",
+        ]
+        for info in lang_info:
+            lbl = QLabel(f"• {info}")
+            lbl.setStyleSheet(f"color:{MUTED};")
+            lang_layout.addWidget(lbl)
+        layout.addWidget(lang_card)
+        layout.addStretch()
+
+        self._settings_ocr_footer = QHBoxLayout()
+        self._settings_ocr_footer.addStretch()
+        detect_btn2 = _ghost_button("⟳  重新检测")
+        detect_btn2.clicked.connect(self.refresh_ocr_status)
+        save_btn = _primary_button("▣  保存设置")
+        save_btn.clicked.connect(self.save_settings)
+        self._settings_ocr_footer.addWidget(detect_btn2)
+        self._settings_ocr_footer.addWidget(save_btn)
+        layout.addLayout(self._settings_ocr_footer)
+
+        self.settings_pages.addWidget(self._settings_ocr_content)
+
+    def _build_settings_hotkey_page(self) -> None:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(34, 28, 34, 18)
+        layout.setSpacing(14)
+        layout.addWidget(_title_block("快捷键", "配置全局快捷键和应用快捷键。"))
 
         self.hotkey_input = QLineEdit(self.settings.hotkey)
         hotkey_card = _settings_card(
-            "⌨  快捷键",
+            "全局快捷键",
             [
                 ("截图翻译", self.hotkey_input),
-                ("发送追问", QLabel("Ctrl + Enter")),
-                ("打开历史", QLabel("Ctrl + H")),
             ],
+            "格式示例: ctrl+alt+t, ctrl+alt+s。修改后自动生效。",
         )
-        scroll_layout.addWidget(hotkey_card)
+        layout.addWidget(hotkey_card)
+
+        app_hotkey_card = _card()
+        hk_layout = QVBoxLayout(app_hotkey_card)
+        hk_layout.setContentsMargins(18, 16, 18, 16)
+        hk_title = QLabel("应用内快捷键")
+        hk_title.setStyleSheet("font-weight:800;")
+        hk_layout.addWidget(hk_title)
+        hotkeys = [
+            ("Ctrl + Enter", "发送追问"),
+            ("Ctrl + H", "打开历史记录页面"),
+            ("Ctrl + T", "触发截图翻译"),
+            ("A+ / A-", "调整字体大小"),
+        ]
+        for key, desc in hotkeys:
+            row = QHBoxLayout()
+            key_lbl = QLabel(key)
+            key_lbl.setStyleSheet(f"font-weight:700; color:{BLUE}; min-width:120px;")
+            desc_lbl = QLabel(desc)
+            desc_lbl.setStyleSheet(f"color:{MUTED};")
+            row.addWidget(key_lbl)
+            row.addWidget(desc_lbl, 1)
+            hk_layout.addLayout(row)
+        layout.addWidget(app_hotkey_card)
+        layout.addStretch()
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        save_btn = _primary_button("▣  保存快捷键")
+        save_btn.clicked.connect(self.save_settings)
+        footer.addWidget(save_btn)
+        layout.addLayout(footer)
+
+        self.settings_pages.addWidget(content)
+
+    def _build_settings_save_page(self) -> None:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(34, 28, 34, 18)
+        layout.setSpacing(14)
+        layout.addWidget(_title_block("保存与导出", "配置数据存储和导出选项。"))
 
         self.save_screenshots_checkbox = QCheckBox("")
         self.save_screenshots_checkbox.setChecked(self.settings.save_screenshots)
         save_card = _settings_card(
-            "▤  保存与导出",
+            "存储选项",
             [
-                ("保存截图", self.save_screenshots_checkbox),
-                ("自动保存会话", QLabel("开启")),
-                ("默认导出格式", QLabel("Markdown（.md）")),
+                ("保存截图文件", self.save_screenshots_checkbox),
+                ("自动保存会话", QLabel("开启（默认）")),
+                ("数据存储位置", QLabel(str(DATA_DIR))),
             ],
         )
-        scroll_layout.addWidget(save_card)
-        scroll_layout.addStretch()
-        scroll.setWidget(scroll_content)
-        content_layout.addWidget(scroll, 1)
+        layout.addWidget(save_card)
+
+        export_card = _card()
+        export_layout = QVBoxLayout(export_card)
+        export_layout.setContentsMargins(18, 16, 18, 16)
+        export_title = QLabel("支持的导出格式")
+        export_title.setStyleSheet("font-weight:800;")
+        export_layout.addWidget(export_title)
+        exports = [
+            ("Markdown (.md)", "历史记录完整导出，含原文/翻译/解释"),
+            ("Anki CSV (.csv)", "术语本导出，可直接导入 Anki 记忆卡"),
+        ]
+        for fmt, desc in exports:
+            row = QHBoxLayout()
+            fmt_lbl = QLabel(fmt)
+            fmt_lbl.setStyleSheet("font-weight:700; min-width:160px;")
+            desc_lbl = QLabel(desc)
+            desc_lbl.setStyleSheet(f"color:{MUTED};")
+            row.addWidget(fmt_lbl)
+            row.addWidget(desc_lbl, 1)
+            export_layout.addLayout(row)
+        layout.addWidget(export_card)
+        layout.addStretch()
 
         footer = QHBoxLayout()
         footer.addStretch()
-        test_button = _ghost_button("⟳  测试连接")
-        test_button.clicked.connect(self.refresh_ocr_status)
-        save_button = _primary_button("▣  保存设置")
-        save_button.clicked.connect(self.save_settings)
-        footer.addWidget(test_button)
-        footer.addWidget(save_button)
-        content_layout.addLayout(footer)
+        save_btn = _primary_button("▣  保存设置")
+        save_btn.clicked.connect(self.save_settings)
+        footer.addWidget(save_btn)
+        layout.addLayout(footer)
 
-        outer.addWidget(settings_nav)
-        outer.addWidget(content_holder, 1)
-        return page
+        self.settings_pages.addWidget(content)
+
+    def _build_settings_about_page(self) -> None:
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(34, 28, 34, 18)
+        layout.setSpacing(14)
+        layout.addWidget(_title_block("关于", "AI Learning Copilot 版本与项目信息。"))
+
+        about_card = _card()
+        about_layout = QVBoxLayout(about_card)
+        about_layout.setContentsMargins(24, 24, 24, 24)
+        about_layout.setSpacing(10)
+
+        logo = QLabel("✧")
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo.setStyleSheet(f"font-size:36px; color:{BLUE};")
+        about_layout.addWidget(logo)
+
+        name_lbl = QLabel("AI Learning Copilot")
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setStyleSheet("font-size:20px; font-weight:800;")
+        about_layout.addWidget(name_lbl)
+
+        ver_lbl = QLabel("版本 0.2.0")
+        ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ver_lbl.setStyleSheet(f"color:{MUTED};")
+        about_layout.addWidget(ver_lbl)
+
+        desc_lbl = QLabel(
+            "一个轻量级桌面学习助手，帮助你从英文软件界面、报错、文档中快速学习。"
+            "通过截图 OCR + AI 翻译解释，自动沉淀为个人知识库。"
+        )
+        desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        desc_lbl.setWordWrap(True)
+        desc_lbl.setStyleSheet(f"color:{MUTED}; line-height:1.5; padding: 8px 0;")
+        about_layout.addWidget(desc_lbl)
+
+        tech_card = _card()
+        tech_layout = QVBoxLayout(tech_card)
+        tech_layout.setContentsMargins(18, 16, 18, 16)
+        tech_title = QLabel("技术栈")
+        tech_title.setStyleSheet("font-weight:800;")
+        tech_layout.addWidget(tech_title)
+        techs = [
+            "Python 3.11 + PySide6 (Qt for Python)",
+            "Tesseract OCR (本地便携版)",
+            "OpenAI 兼容 API (Chat Completions)",
+            "SQLite + FTS5 全文搜索",
+            "mss 原生分辨率截图",
+            "pynput 全局热键",
+        ]
+        for t in techs:
+            lbl = QLabel(f"• {t}")
+            lbl.setStyleSheet(f"color:{MUTED};")
+            tech_layout.addWidget(lbl)
+        about_layout.addWidget(tech_card)
+        layout.addWidget(about_card)
+        layout.addStretch()
+
+        self.settings_pages.addWidget(content)
+
+    def _test_ai_connection(self) -> None:
+        from app.services.ai_client import AIClient, AIClientError
+        test_settings = AppSettings(
+            api_key=self.api_key_input.text().strip(),
+            base_url=self.base_url_input.text().strip(),
+            model=self.model_input.text().strip(),
+        )
+        try:
+            client = AIClient(test_settings)
+            client.explain_text("Hello world")
+            QMessageBox.information(self, "连接成功", "AI 接口连接正常！")
+        except AIClientError as exc:
+            QMessageBox.warning(self, "连接失败", str(exc))
+        except Exception as exc:
+            QMessageBox.warning(self, "连接失败", f"未知错误: {exc}")
 
     def refresh_ocr_status(self) -> None:
         if not hasattr(self, "ocr_status_label"):
@@ -829,6 +1418,8 @@ class MainWindow(QMainWindow):
         self.last_result_detail.setPlainText(_format_payload(payload))
         self.refresh_history()
         self.refresh_terms()
+        if hasattr(self, "stat_card_today"):
+            self.refresh_statistics()
         self.status_label.setText("截图翻译已完成并保存。")
 
     def _on_text_explained(self, payload: dict) -> None:
@@ -858,6 +1449,7 @@ class MainWindow(QMainWindow):
         self.history_translation_box.setPlainText(record.translation or "无")
         self.history_explanation_box.setPlainText(record.explanation or "无")
         self.history_tags_label.setText(f"标签：{'、'.join(record.tags) if record.tags else '无'}")
+        self.history_category_label.setText(f"分类：{record.category or '未分类'}")
 
     def _clear_history_detail(self) -> None:
         self.history_title_label.setText("选择一条记录")
@@ -868,6 +1460,7 @@ class MainWindow(QMainWindow):
         self.history_translation_box.clear()
         self.history_explanation_box.clear()
         self.history_tags_label.setText("标签：无")
+        self.history_category_label.setText("分类：-")
 
     def _open_history_result(self, item: QListWidgetItem) -> None:
         record = self.history_store.get_capture(int(item.data(Qt.ItemDataRole.UserRole)))
@@ -911,6 +1504,8 @@ class MainWindow(QMainWindow):
             self.term_explanation_label.clear()
             self.term_example_label.clear()
             self.term_count_label.setText("出现次数：-")
+            if hasattr(self, "favorite_button"):
+                self.favorite_button.setText("☆ 收藏")
             return
         term = self._terms_records[row]
         self.term_name_label.setText(term.term)
@@ -918,6 +1513,8 @@ class MainWindow(QMainWindow):
         self.term_explanation_label.setPlainText(term.beginner_explanation or "无")
         self.term_example_label.setPlainText("；".join(term.examples) if term.examples else "无")
         self.term_count_label.setText(str(term.review_count))
+        if hasattr(self, "favorite_button"):
+            self.favorite_button.setText("★ 已收藏" if term.favorite else "☆ 收藏")
 
     def _delete_selected_term(self) -> None:
         row = self.terms_table.currentRow()
@@ -1001,8 +1598,21 @@ class MainWindow(QMainWindow):
         self.refresh_terms()
         self.status_label.setText("术语已更新。")
 
-    def _show_favorite_hint(self) -> None:
-        QMessageBox.information(self, "收藏术语", "当前数据库还没有收藏字段，后续会作为术语本增强项加入。")
+    def _toggle_favorite(self) -> None:
+        row = self.terms_table.currentRow()
+        if row < 0 or row >= len(self._terms_records):
+            return
+        term = self._terms_records[row]
+        new_state = self.history_store.toggle_term_favorite(term.id)
+        self._terms_records[row] = TermRecord(
+            id=term.id, term=term.term, chinese_name=term.chinese_name,
+            beginner_explanation=term.beginner_explanation, examples=term.examples,
+            first_seen_at=term.first_seen_at, review_count=term.review_count,
+            favorite=new_state,
+        )
+        self._show_selected_term()
+        self.refresh_statistics()
+        self.status_label.setText(f"术语「{term.term}」{'已收藏 ★' if new_state else '取消收藏'}")
 
     def _history_item_widget(self, record: CaptureRecord) -> QWidget:
         widget = QWidget()
