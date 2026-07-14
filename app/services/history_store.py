@@ -21,6 +21,7 @@ class CaptureRecord:
     explanation: str
     app_name: str
     tags: list[str]
+    category: str = ""
 
 
 @dataclass(slots=True)
@@ -32,6 +33,7 @@ class TermRecord:
     examples: list[str]
     first_seen_at: str
     review_count: int
+    favorite: bool = False
 
 
 @dataclass(slots=True)
@@ -64,7 +66,8 @@ class HistoryStore:
                     translation TEXT NOT NULL DEFAULT '',
                     explanation TEXT NOT NULL DEFAULT '',
                     app_name TEXT NOT NULL DEFAULT '',
-                    tags TEXT NOT NULL DEFAULT '[]'
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    category TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -77,7 +80,8 @@ class HistoryStore:
                     beginner_explanation TEXT NOT NULL DEFAULT '',
                     examples TEXT NOT NULL DEFAULT '[]',
                     first_seen_at TEXT NOT NULL,
-                    review_count INTEGER NOT NULL DEFAULT 0
+                    review_count INTEGER NOT NULL DEFAULT 0,
+                    favorite INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -113,7 +117,33 @@ class HistoryStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS capture_embeddings (
+                    capture_id INTEGER PRIMARY KEY,
+                    embedding BLOB NOT NULL,
+                    model TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(capture_id) REFERENCES captures(id) ON DELETE CASCADE
+                )
+                """
+            )
             self._try_initialize_fts(conn)
+            self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(captures)")}
+            if "category" not in cols:
+                conn.execute("ALTER TABLE captures ADD COLUMN category TEXT NOT NULL DEFAULT ''")
+        except sqlite3.Error:
+            pass
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(terms)")}
+            if "favorite" not in cols:
+                conn.execute("ALTER TABLE terms ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.Error:
+            pass
 
     def save_capture(
         self,
@@ -123,14 +153,15 @@ class HistoryStore:
         explanation: str,
         app_name: str = "",
         tags: list[str] | None = None,
+        category: str = "",
     ) -> int:
         created_at = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO captures
-                    (created_at, image_path, source_text, translation, explanation, app_name, tags)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (created_at, image_path, source_text, translation, explanation, app_name, tags, category)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -140,6 +171,7 @@ class HistoryStore:
                     explanation,
                     app_name,
                     json.dumps(tags or [], ensure_ascii=False),
+                    category,
                 ),
             )
             return int(cursor.lastrowid)
@@ -177,6 +209,73 @@ class HistoryStore:
                     (limit,),
                 ).fetchall()
         return [_capture_from_row(row) for row in rows]
+
+    def search_captures_advanced(
+        self,
+        query: str = "",
+        date_from: str = "",
+        date_to: str = "",
+        category: str = "",
+        has_followup: bool = False,
+        has_category: bool = False,
+        limit: int = 200,
+    ) -> list[CaptureRecord]:
+        conditions: list[str] = []
+        params: list = []
+
+        if query.strip():
+            like = f"%{query.strip()}%"
+            conditions.append("(source_text LIKE ? OR translation LIKE ? OR explanation LIKE ? OR tags LIKE ?)")
+            params.extend([like, like, like, like])
+
+        if date_from:
+            conditions.append("created_at >= ?")
+            params.append(date_from)
+
+        if date_to:
+            conditions.append("created_at <= ?")
+            params.append(date_to)
+
+        if category:
+            conditions.append("category = ?")
+            params.append(category)
+
+        if has_category:
+            conditions.append("category != ''")
+
+        if has_followup:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM conversations WHERE conversations.capture_id = captures.id)"
+            )
+
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM captures
+                {where_sql}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        return [_capture_from_row(row) for row in rows]
+
+    def capture_has_followup(self, capture_id: int) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE captures_id = ?) AND role = 'assistant'",
+                (capture_id,),
+            ).fetchone()
+        return int(row[0]) > 0 if row else False
+
+    def get_category_list(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT category FROM captures WHERE category != '' ORDER BY category"
+            ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def get_capture(self, capture_id: int) -> CaptureRecord | None:
         with self._connect() as conn:
@@ -259,6 +358,31 @@ class HistoryStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM terms WHERE id = ?", (term_id,))
 
+    def toggle_term_favorite(self, term_id: int) -> bool:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE terms SET favorite = 1 - favorite WHERE id = ?",
+                (term_id,),
+            )
+            row = conn.execute("SELECT favorite FROM terms WHERE id = ?", (term_id,)).fetchone()
+        return bool(row["favorite"]) if row else False
+
+    def delete_capture(self, capture_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM captures WHERE id = ?", (capture_id,))
+
+    def delete_captures_before(self, before_date: str) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM captures WHERE created_at < ?",
+                (before_date,),
+            )
+            return int(cursor.rowcount)
+
+    def vacuum(self) -> None:
+        with self._connect() as conn:
+            conn.execute("VACUUM")
+
     def create_conversation(self, capture_id: int, title: str = "") -> int:
         created_at = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
@@ -336,6 +460,101 @@ class HistoryStore:
                     (limit,),
                 ).fetchall()
         return [_term_from_row(row) for row in rows]
+
+    def get_statistics(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            total_captures = conn.execute("SELECT COUNT(*) FROM captures").fetchone()[0]
+            total_terms = conn.execute("SELECT COUNT(*) FROM terms").fetchone()[0]
+            favorite_terms = conn.execute("SELECT COUNT(*) FROM terms WHERE favorite = 1").fetchone()[0]
+            total_conversations = conn.execute("SELECT COUNT(*) FROM messages WHERE role='assistant'").fetchone()[0]
+
+            today = datetime.now().strftime("%Y-%m-%d")
+            today_captures = conn.execute(
+                "SELECT COUNT(*) FROM captures WHERE created_at LIKE ?",
+                (f"{today}%",),
+            ).fetchone()[0]
+
+            week_start = datetime.now()
+            from datetime import timedelta
+            week_start = (week_start - timedelta(days=week_start.weekday())).strftime("%Y-%m-%d")
+            week_captures = conn.execute(
+                "SELECT COUNT(*) FROM captures WHERE created_at >= ?",
+                (week_start,),
+            ).fetchone()[0]
+
+            month_start = datetime.now().strftime("%Y-%m")
+            month_captures = conn.execute(
+                "SELECT COUNT(*) FROM captures WHERE created_at LIKE ?",
+                (f"{month_start}%",),
+            ).fetchone()[0]
+
+            tag_distribution: dict[str, int] = {}
+            rows = conn.execute("SELECT tags FROM captures WHERE tags != '[]'").fetchall()
+            for row in rows:
+                for tag in _loads_list(str(row[0])):
+                    tag_distribution[tag] = tag_distribution.get(tag, 0) + 1
+            tag_distribution = dict(sorted(tag_distribution.items(), key=lambda x: x[1], reverse=True)[:20])
+
+            category_distribution: dict[str, int] = {}
+            rows = conn.execute("SELECT category FROM captures WHERE category != ''").fetchall()
+            for row in rows:
+                cat = str(row[0])
+                category_distribution[cat] = category_distribution.get(cat, 0) + 1
+            category_distribution = dict(sorted(category_distribution.items(), key=lambda x: x[1], reverse=True))
+
+            daily_activity: dict[str, int] = {}
+            rows = conn.execute(
+                "SELECT substr(created_at, 1, 10) AS day, COUNT(*) FROM captures GROUP BY day ORDER BY day DESC LIMIT 90",
+            ).fetchall()
+            for row in rows:
+                daily_activity[str(row[0])] = int(row[1])
+
+            avg_explanation_length = conn.execute(
+                "SELECT AVG(LENGTH(explanation)) FROM captures WHERE explanation != ''",
+            ).fetchone()[0]
+
+            last_capture = conn.execute(
+                "SELECT created_at FROM captures ORDER BY created_at DESC LIMIT 1",
+            ).fetchone()
+            last_capture_at = str(last_capture[0]) if last_capture else ""
+
+        return {
+            "total_captures": total_captures,
+            "total_terms": total_terms,
+            "favorite_terms": favorite_terms,
+            "total_conversations": total_conversations,
+            "today_captures": today_captures,
+            "week_captures": week_captures,
+            "month_captures": month_captures,
+            "tag_distribution": tag_distribution,
+            "category_distribution": category_distribution,
+            "daily_activity": daily_activity,
+            "avg_explanation_length": round(avg_explanation_length) if avg_explanation_length else 0,
+            "last_capture_at": last_capture_at,
+        }
+
+    def save_embedding(self, capture_id: int, embedding: bytes, model: str = "") -> None:
+        created_at = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO capture_embeddings(capture_id, embedding, model, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(capture_id) DO UPDATE SET
+                    embedding = excluded.embedding,
+                    model = excluded.model,
+                    created_at = excluded.created_at
+                """,
+                (capture_id, embedding, model, created_at),
+            )
+
+    def get_embedding(self, capture_id: int) -> bytes | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT embedding FROM capture_embeddings WHERE capture_id = ?",
+                (capture_id,),
+            ).fetchone()
+        return bytes(row[0]) if row else None
 
     def get_settings(self) -> dict[str, str]:
         with self._connect() as conn:
@@ -419,6 +638,7 @@ def _capture_from_row(row: sqlite3.Row) -> CaptureRecord:
         explanation=str(row["explanation"]),
         app_name=str(row["app_name"]),
         tags=_loads_list(row["tags"]),
+        category=str(row["category"]) if "category" in row.keys() else "",
     )
 
 
@@ -431,6 +651,7 @@ def _term_from_row(row: sqlite3.Row) -> TermRecord:
         examples=_loads_list(row["examples"]),
         first_seen_at=str(row["first_seen_at"]),
         review_count=int(row["review_count"]),
+        favorite=bool(row["favorite"]) if "favorite" in row.keys() else False,
     )
 
 
