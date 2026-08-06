@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from PySide6.QtWidgets import QFrame, QPushButton
+from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QWidget
 
 
 BLUE = "#2563eb"
 BLUE_DARK = "#1d4ed8"
-BLUE_SOFT = "#eff6ff"
-BORDER = "#dbe3ef"
+BLUE_HOVER = "#3b82f6"
+BLUE_SOFT = "#eff4ff"
+BORDER = "#e4e7ec"
+BORDER_LIGHT = "#eef1f4"
 TEXT = "#101828"
 MUTED = "#667085"
-BG = "#f8fbff"
+BG = "#f6f7f9"
 CARD = "#ffffff"
 GREEN = "#16a34a"
 RED = "#dc2626"
@@ -20,46 +22,65 @@ QMainWindow, QWidget {{
     background: {BG};
     color: {TEXT};
     font-family: "Microsoft YaHei", "Segoe UI", Arial;
-    font-size: 13px;
 }}
-QLineEdit, QTextEdit, QTextBrowser {{
+QLabel {{
+    background: transparent;
+}}
+QLineEdit, QTextEdit, QTextBrowser, QPlainTextEdit {{
     background: #ffffff;
     border: 1px solid {BORDER};
     border-radius: 8px;
-    padding: 6px;
+    padding: 6px 8px;
     selection-background-color: {BLUE};
+}}
+QLineEdit:focus, QTextEdit:focus, QTextBrowser:focus, QPlainTextEdit:focus {{
+    border: 1px solid {BLUE};
+}}
+QComboBox {{
+    background: #ffffff;
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    padding: 4px 8px;
+}}
+QComboBox:focus {{
+    border: 1px solid {BLUE};
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 22px;
 }}
 QPushButton {{
     background: #ffffff;
     border: 1px solid {BORDER};
     border-radius: 8px;
-    padding: 6px 12px;
+    padding: 6px 14px;
     color: #344054;
 }}
 QPushButton:hover {{
-    border-color: #93b4ff;
-    background: #f8fbff;
+    border-color: {BLUE_HOVER};
+    color: {BLUE};
+}}
+QPushButton:pressed {{
+    background: {BLUE_SOFT};
 }}
 QPushButton#primaryButton {{
     background: {BLUE};
     color: #ffffff;
-    border-color: {BLUE};
-    font-weight: 600;
+    border: 1px solid {BLUE};
 }}
 QPushButton#primaryButton:hover {{
     background: {BLUE_DARK};
-    color: #ffffff;
     border-color: {BLUE_DARK};
+    color: #ffffff;
 }}
 QPushButton#primaryButton:pressed {{
     background: {BLUE_DARK};
     color: #ffffff;
-    border-color: {BLUE_DARK};
 }}
 QPushButton:disabled {{
     background: #f2f4f7;
     color: #98a2b3;
-    border-color: #e4e7ec;
+    border-color: {BORDER};
 }}
 QPushButton#dangerButton {{
     background: #fff5f5;
@@ -68,122 +89,119 @@ QPushButton#dangerButton {{
 }}
 QTableWidget {{
     background: #ffffff;
-    border: 1px solid {BORDER};
-    border-radius: 10px;
-    gridline-color: #e8eef7;
+    border: none;
+    gridline-color: transparent;
 }}
 QHeaderView::section {{
     background: #ffffff;
     border: none;
-    border-bottom: 1px solid {BORDER};
-    padding: 7px;
-    color: #475467;
-    font-weight: 600;
+    border-bottom: 1px solid {BORDER_LIGHT};
+    padding: 8px 7px;
+    color: #667085;
 }}
 QTableWidget::item {{
     padding: 7px;
-    border-bottom: 1px solid #eef2f7;
+    border-bottom: 1px solid {BORDER_LIGHT};
 }}
 QTableWidget::item:selected {{
-    background: #eff6ff;
+    background: {BLUE_SOFT};
     color: {TEXT};
 }}
 QListWidget {{
     background: #ffffff;
-    border: 1px solid {BORDER};
-    border-radius: 10px;
+    border: none;
     outline: 0;
 }}
 QListWidget::item {{
-    padding: 8px;
-    border-bottom: 1px solid #eef2f7;
-}}
-QListWidget::item:selected {{
-    background: #eff6ff;
-    color: {TEXT};
-    border: 1px solid {BLUE};
+    padding: 8px 10px;
     border-radius: 8px;
 }}
+QListWidget::item:selected {{
+    background: {BLUE_SOFT};
+    color: {TEXT};
+}}
+QScrollBar:vertical, QScrollBar:horizontal {{
+    border: none;
+    background: transparent;
+    margin: 4px;
+}}
 QScrollBar:vertical {{
-    width: 10px;
+    width: 8px;
+}}
+QScrollBar:horizontal {{
+    height: 8px;
+}}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+    background: #d0d5dd;
+    border-radius: 4px;
+    min-height: 28px;
+    min-width: 28px;
+}}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {{
+    background: #98a2b3;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0;
+    height: 0;
+    border: none;
     background: transparent;
 }}
-QScrollBar::handle:vertical {{
-    background: #cbd5e1;
-    border-radius: 5px;
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical,
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: transparent;
+}}
+QScrollBar::corner {{
+    background: transparent;
 }}
 """
 
 
-def make_card(object_name: str = "") -> QFrame:
-    card = QFrame()
-    if object_name:
-        card.setObjectName(object_name)
-    card.setFrameShape(QFrame.Shape.NoFrame)
-    card.setStyleSheet(
-        f"""
-        QFrame#{object_name or card.objectName()} {{
-            background: {CARD};
-            border: 1px solid {BORDER};
-            border-radius: 12px;
-        }}
-        """
-    )
-    return card
+def ensure_label_backgrounds_transparent(root: QWidget) -> None:
+    """Remove inherited widget fills from labels without an intentional background."""
+    labels = [root] if isinstance(root, QLabel) else []
+    labels.extend(root.findChildren(QLabel))
+    for label in labels:
+        style = label.styleSheet()
+        normalized = style.lower()
+        if any(
+            property_name in normalized
+            for property_name in ("background:", "background-color:", "background-image:")
+        ):
+            continue
+        suffix = "background: transparent;"
+        label.setStyleSheet(f"{style.rstrip()}\n{suffix}" if style.strip() else suffix)
 
 
-def primary_button(text: str) -> QPushButton:
-    button = QPushButton(text)
+def apply_primary_button_style(button: QPushButton) -> QPushButton:
+    """Apply the primary button style directly to avoid parent QSS scope issues."""
     button.setObjectName("primaryButton")
-    return button
-
-
-def ghost_button(text: str) -> QPushButton:
-    return QPushButton(text)
-
-
-def nav_button(text: str) -> QPushButton:
-    button = QPushButton(text)
-    button.setCheckable(True)
     button.setStyleSheet(
         f"""
-        QPushButton {{
-            text-align: left;
-            padding: 12px 14px;
-            border: 0;
-            border-radius: 10px;
-            background: transparent;
-            color: #344054;
-            font-weight: 500;
+        QPushButton#primaryButton {{
+            background: {BLUE};
+            border: 1px solid {BLUE};
+            border-radius: 8px;
+            padding: 6px 14px;
+            color: #ffffff;
         }}
-        QPushButton:hover {{
-            background: #f1f6ff;
-            color: {BLUE};
+        QPushButton#primaryButton:hover {{
+            background: {BLUE_DARK};
+            border-color: {BLUE_DARK};
+            color: #ffffff;
         }}
-        QPushButton:checked {{
-            background: #eaf2ff;
-            color: {BLUE};
-            font-weight: 700;
+        QPushButton#primaryButton:pressed {{
+            background: {BLUE_DARK};
+            border-color: {BLUE_DARK};
+            color: #ffffff;
+        }}
+        QPushButton#primaryButton:disabled {{
+            background: #f2f4f7;
+            border-color: #e4e7ec;
+            color: #98a2b3;
         }}
         """
     )
     return button
 
 
-def chip(text: str, active: bool = False) -> QPushButton:
-    button = QPushButton(text)
-    if active:
-        button.setObjectName("primaryButton")
-    else:
-        button.setStyleSheet(
-            f"""
-            QPushButton {{
-                background: #ffffff;
-                border: 1px solid {BORDER};
-                border-radius: 18px;
-                padding: 7px 18px;
-                color: #344054;
-            }}
-            """
-        )
-    return button

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from app.paths import DB_PATH, ensure_app_dirs
+from app.services.context_detector import detect_domain
 
 
 @dataclass(slots=True)
@@ -22,6 +23,7 @@ class CaptureRecord:
     app_name: str
     tags: list[str]
     category: str = ""
+    domain: str = "通用"
 
 
 @dataclass(slots=True)
@@ -33,6 +35,7 @@ class TermRecord:
     examples: list[str]
     first_seen_at: str
     review_count: int
+    domain: str = "通用"
     favorite: bool = False
 
 
@@ -44,6 +47,19 @@ class ConversationMessage:
     content: str
     created_at: str
     mode: str
+
+
+@dataclass(slots=True)
+class ContextRecord:
+    id: int
+    name: str
+    domain: str
+    scene: str
+    summary: str
+    instruction: str
+    builtin: bool
+    created_at: str
+    updated_at: str
 
 
 class HistoryStore:
@@ -67,7 +83,8 @@ class HistoryStore:
                     explanation TEXT NOT NULL DEFAULT '',
                     app_name TEXT NOT NULL DEFAULT '',
                     tags TEXT NOT NULL DEFAULT '[]',
-                    category TEXT NOT NULL DEFAULT ''
+                    category TEXT NOT NULL DEFAULT '',
+                    domain TEXT NOT NULL DEFAULT '通用'
                 )
                 """
             )
@@ -75,13 +92,15 @@ class HistoryStore:
                 """
                 CREATE TABLE IF NOT EXISTS terms (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    term TEXT NOT NULL UNIQUE,
+                    term TEXT NOT NULL,
+                    domain TEXT NOT NULL DEFAULT '通用',
                     chinese_name TEXT NOT NULL DEFAULT '',
                     beginner_explanation TEXT NOT NULL DEFAULT '',
                     examples TEXT NOT NULL DEFAULT '[]',
                     first_seen_at TEXT NOT NULL,
                     review_count INTEGER NOT NULL DEFAULT 0,
-                    favorite INTEGER NOT NULL DEFAULT 0
+                    favorite INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(term, domain)
                 )
                 """
             )
@@ -128,8 +147,36 @@ class HistoryStore:
                 )
                 """
             )
-            self._try_initialize_fts(conn)
+            self._initialize_contexts_table(conn)
             self._migrate_schema(conn)
+            self._try_initialize_fts(conn)
+
+    def _initialize_contexts_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS contexts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                domain TEXT NOT NULL DEFAULT '通用',
+                scene TEXT NOT NULL DEFAULT '通用',
+                summary TEXT NOT NULL DEFAULT '',
+                instruction TEXT NOT NULL DEFAULT '',
+                builtin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        now = datetime.now().isoformat(timespec="seconds")
+        existing = conn.execute("SELECT COUNT(*) FROM contexts").fetchone()[0]
+        if existing == 0:
+            conn.execute(
+                """
+                INSERT INTO contexts (name, domain, scene, summary, instruction, builtin, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("通用", "通用", "通用", "", "", 1, now, now),
+            )
 
     def _migrate_schema(self, conn: sqlite3.Connection) -> None:
         try:
@@ -139,9 +186,62 @@ class HistoryStore:
         except sqlite3.Error:
             pass
         try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(captures)")}
+            if "domain" not in cols:
+                conn.execute("DROP TRIGGER IF EXISTS captures_ai")
+                conn.execute("DROP TRIGGER IF EXISTS captures_ad")
+                conn.execute("DROP TRIGGER IF EXISTS captures_au")
+                conn.execute("ALTER TABLE captures ADD COLUMN domain TEXT NOT NULL DEFAULT '通用'")
+                rows = conn.execute(
+                    "SELECT id, source_text, translation, explanation, tags, category FROM captures"
+                ).fetchall()
+                for row in rows:
+                    text = " ".join(
+                        str(row[key] or "")
+                        for key in ("source_text", "translation", "explanation", "tags", "category")
+                    )
+                    inferred = detect_domain(text)
+                    conn.execute(
+                        "UPDATE captures SET domain = ? WHERE id = ?",
+                        ("通用" if inferred == "其他" else inferred, int(row["id"])),
+                    )
+        except sqlite3.Error:
+            pass
+        try:
             cols = {row["name"] for row in conn.execute("PRAGMA table_info(terms)")}
             if "favorite" not in cols:
                 conn.execute("ALTER TABLE terms ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.Error:
+            pass
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(terms)")}
+            if "domain" not in cols:
+                conn.execute("ALTER TABLE terms RENAME TO terms_old")
+                conn.execute(
+                    """
+                    CREATE TABLE terms (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        term TEXT NOT NULL,
+                        domain TEXT NOT NULL DEFAULT '通用',
+                        chinese_name TEXT NOT NULL DEFAULT '',
+                        beginner_explanation TEXT NOT NULL DEFAULT '',
+                        examples TEXT NOT NULL DEFAULT '[]',
+                        first_seen_at TEXT NOT NULL,
+                        review_count INTEGER NOT NULL DEFAULT 0,
+                        favorite INTEGER NOT NULL DEFAULT 0,
+                        UNIQUE(term, domain)
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    INSERT INTO terms
+                        (id, term, domain, chinese_name, beginner_explanation, examples, first_seen_at, review_count, favorite)
+                    SELECT id, term, '通用', chinese_name, beginner_explanation, examples, first_seen_at, review_count, favorite
+                    FROM terms_old
+                    """
+                )
+                conn.execute("DROP TABLE terms_old")
         except sqlite3.Error:
             pass
 
@@ -154,14 +254,15 @@ class HistoryStore:
         app_name: str = "",
         tags: list[str] | None = None,
         category: str = "",
+        domain: str = "通用",
     ) -> int:
         created_at = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO captures
-                    (created_at, image_path, source_text, translation, explanation, app_name, tags, category)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (created_at, image_path, source_text, translation, explanation, app_name, tags, category, domain)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -172,9 +273,40 @@ class HistoryStore:
                     app_name,
                     json.dumps(tags or [], ensure_ascii=False),
                     category,
+                    domain or "通用",
                 ),
             )
             return int(cursor.lastrowid)
+
+    def update_capture(
+        self,
+        capture_id: int,
+        *,
+        translation: str,
+        explanation: str,
+        tags: list[str] | None = None,
+        category: str = "",
+        domain: str | None = None,
+    ) -> bool:
+        """Update an existing capture's AI result fields, keeping created_at/image_path."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE captures
+                SET translation = ?, explanation = ?, tags = ?, category = ?,
+                    domain = COALESCE(?, domain)
+                WHERE id = ?
+                """,
+                (
+                    translation,
+                    explanation,
+                    json.dumps(tags or [], ensure_ascii=False),
+                    category,
+                    domain,
+                    capture_id,
+                ),
+            )
+            return cursor.rowcount > 0
 
     def search_captures(self, query: str = "", limit: int = 100) -> list[CaptureRecord]:
         query = query.strip()
@@ -216,6 +348,7 @@ class HistoryStore:
         date_from: str = "",
         date_to: str = "",
         category: str = "",
+        domain: str = "",
         has_followup: bool = False,
         has_category: bool = False,
         limit: int = 200,
@@ -240,6 +373,10 @@ class HistoryStore:
             conditions.append("category = ?")
             params.append(category)
 
+        if domain:
+            conditions.append("domain = ?")
+            params.append(domain)
+
         if has_category:
             conditions.append("category != ''")
 
@@ -262,27 +399,24 @@ class HistoryStore:
             ).fetchall()
         return [_capture_from_row(row) for row in rows]
 
-    def capture_has_followup(self, capture_id: int) -> bool:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE captures_id = ?) AND role = 'assistant'",
-                (capture_id,),
-            ).fetchone()
-        return int(row[0]) > 0 if row else False
-
-    def get_category_list(self) -> list[str]:
+    def capture_domain_counts(self) -> list[tuple[str, int]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT DISTINCT category FROM captures WHERE category != '' ORDER BY category"
+                """
+                SELECT domain, COUNT(*) AS n
+                FROM captures
+                GROUP BY domain
+                ORDER BY n DESC, domain
+                """
             ).fetchall()
-        return [str(row[0]) for row in rows]
+        return [(str(row["domain"] or "通用"), int(row["n"])) for row in rows]
 
     def get_capture(self, capture_id: int) -> CaptureRecord | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM captures WHERE id = ?", (capture_id,)).fetchone()
         return _capture_from_row(row) if row else None
 
-    def upsert_terms(self, terms: list[dict[str, Any]]) -> None:
+    def upsert_terms(self, terms: list[dict[str, Any]], domain: str = "通用") -> None:
         if not terms:
             return
         now = datetime.now().isoformat(timespec="seconds")
@@ -294,9 +428,9 @@ class HistoryStore:
                 conn.execute(
                     """
                     INSERT INTO terms
-                        (term, chinese_name, beginner_explanation, examples, first_seen_at, review_count)
-                    VALUES (?, ?, ?, ?, ?, 1)
-                    ON CONFLICT(term) DO UPDATE SET
+                        (term, domain, chinese_name, beginner_explanation, examples, first_seen_at, review_count)
+                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                    ON CONFLICT(term, domain) DO UPDATE SET
                         chinese_name = excluded.chinese_name,
                         beginner_explanation = excluded.beginner_explanation,
                         examples = excluded.examples,
@@ -304,6 +438,7 @@ class HistoryStore:
                     """,
                     (
                         name,
+                        domain,
                         str(term.get("chinese_name") or ""),
                         str(term.get("beginner_explanation") or ""),
                         json.dumps(term.get("examples") or [], ensure_ascii=False),
@@ -318,6 +453,7 @@ class HistoryStore:
         beginner_explanation: str = "",
         examples: list[str] | None = None,
         term_id: int | None = None,
+        domain: str = "通用",
     ) -> int:
         name = term.strip()
         if not name:
@@ -328,24 +464,25 @@ class HistoryStore:
                 conn.execute(
                     """
                     UPDATE terms
-                    SET term = ?, chinese_name = ?, beginner_explanation = ?, examples = ?
+                    SET term = ?, domain = ?, chinese_name = ?, beginner_explanation = ?, examples = ?
                     WHERE id = ?
                     """,
-                    (name, chinese_name, beginner_explanation, payload, term_id),
+                    (name, domain, chinese_name, beginner_explanation, payload, term_id),
                 )
                 return term_id
             cursor = conn.execute(
                 """
                 INSERT INTO terms
-                    (term, chinese_name, beginner_explanation, examples, first_seen_at, review_count)
-                VALUES (?, ?, ?, ?, ?, 1)
-                ON CONFLICT(term) DO UPDATE SET
+                    (term, domain, chinese_name, beginner_explanation, examples, first_seen_at, review_count)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(term, domain) DO UPDATE SET
                     chinese_name = excluded.chinese_name,
                     beginner_explanation = excluded.beginner_explanation,
                     examples = excluded.examples
                 """,
                 (
                     name,
+                    domain,
                     chinese_name,
                     beginner_explanation,
                     payload,
@@ -434,32 +571,81 @@ class HistoryStore:
             ).fetchall()
         return [_message_from_row(row) for row in rows]
 
-    def list_terms(self, query: str = "", limit: int = 200) -> list[TermRecord]:
+    def list_terms(
+        self,
+        query: str = "",
+        domain: str = "",
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[TermRecord]:
         query = query.strip()
+        where: list[str] = []
+        params: list = []
+        if query:
+            like = f"%{query}%"
+            where.append("(term LIKE ? OR chinese_name LIKE ? OR beginner_explanation LIKE ?)")
+            params.extend([like, like, like])
+        if domain:
+            where.append("domain = ?")
+            params.append(domain)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as conn:
-            if query:
-                like = f"%{query}%"
-                rows = conn.execute(
-                    """
-                    SELECT * FROM terms
-                    WHERE term LIKE ?
-                       OR chinese_name LIKE ?
-                       OR beginner_explanation LIKE ?
-                    ORDER BY review_count DESC, first_seen_at DESC
-                    LIMIT ?
-                    """,
-                    (like, like, like, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM terms
-                    ORDER BY review_count DESC, first_seen_at DESC
-                    LIMIT ?
-                    """,
-                    (limit,),
-                ).fetchall()
+            rows = conn.execute(
+                f"""
+                SELECT * FROM terms
+                {where_sql}
+                ORDER BY review_count DESC, first_seen_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                (*params, limit, offset),
+            ).fetchall()
         return [_term_from_row(row) for row in rows]
+
+    def count_favorite_terms(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM terms WHERE favorite = 1"
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def count_terms(self, query: str = "", domain: str = "") -> int:
+        query = query.strip()
+        where: list[str] = []
+        params: list = []
+        if query:
+            like = f"%{query}%"
+            where.append("(term LIKE ? OR chinese_name LIKE ? OR beginner_explanation LIKE ?)")
+            params.extend([like, like, like])
+        if domain:
+            where.append("domain = ?")
+            params.append(domain)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._connect() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM terms {where_sql}", params
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def term_domain_counts(self, query: str = "") -> list[tuple[str, int]]:
+        """Count terms per domain (optional search query scoping)."""
+        query = query.strip()
+        where: list[str] = []
+        params: list = []
+        if query:
+            like = f"%{query}%"
+            where.append("(term LIKE ? OR chinese_name LIKE ? OR beginner_explanation LIKE ?)")
+            params.extend([like, like, like])
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT domain, COUNT(*) AS n FROM terms
+                {where_sql}
+                GROUP BY domain ORDER BY n DESC, domain
+                """,
+                params,
+            ).fetchall()
+        return [(str(row[0]), int(row[1])) for row in rows]
 
     def get_statistics(self) -> dict[str, Any]:
         with self._connect() as conn:
@@ -572,6 +758,65 @@ class HistoryStore:
                 (key, value),
             )
 
+    def list_contexts(self) -> list[ContextRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM contexts ORDER BY builtin DESC, id ASC"
+            ).fetchall()
+        return [_context_from_row(row) for row in rows]
+
+    def get_context(self, context_id: int) -> ContextRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM contexts WHERE id = ?", (context_id,)
+            ).fetchone()
+        return _context_from_row(row) if row else None
+
+    def save_context(
+        self,
+        name: str,
+        domain: str = "通用",
+        scene: str = "通用",
+        summary: str = "",
+        instruction: str = "",
+        context_id: int | None = None,
+    ) -> int:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as conn:
+            if context_id is not None:
+                existing = conn.execute(
+                    "SELECT builtin FROM contexts WHERE id = ?", (context_id,)
+                ).fetchone()
+                if existing is None:
+                    raise ValueError(f"上下文不存在: {context_id}")
+                if existing["builtin"]:
+                    raise ValueError("内置上下文不可修改")
+                conn.execute(
+                    """
+                    UPDATE contexts
+                    SET name = ?, domain = ?, scene = ?, summary = ?,
+                        instruction = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (name, domain, scene, summary, instruction, now, context_id),
+                )
+                return context_id
+            cursor = conn.execute(
+                """
+                INSERT INTO contexts (name, domain, scene, summary, instruction, builtin, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (name, domain, scene, summary, instruction, now, now),
+            )
+            return int(cursor.lastrowid)
+
+    def delete_context(self, context_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM contexts WHERE id = ? AND builtin = 0", (context_id,)
+            )
+            return cursor.rowcount > 0
+
     def _search_captures_fts(self, query: str, limit: int) -> list[CaptureRecord]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -639,6 +884,7 @@ def _capture_from_row(row: sqlite3.Row) -> CaptureRecord:
         app_name=str(row["app_name"]),
         tags=_loads_list(row["tags"]),
         category=str(row["category"]) if "category" in row.keys() else "",
+        domain=str(row["domain"]) if "domain" in row.keys() else "通用",
     )
 
 
@@ -651,6 +897,7 @@ def _term_from_row(row: sqlite3.Row) -> TermRecord:
         examples=_loads_list(row["examples"]),
         first_seen_at=str(row["first_seen_at"]),
         review_count=int(row["review_count"]),
+        domain=str(row["domain"]) if "domain" in row.keys() else "通用",
         favorite=bool(row["favorite"]) if "favorite" in row.keys() else False,
     )
 
@@ -663,6 +910,20 @@ def _message_from_row(row: sqlite3.Row) -> ConversationMessage:
         content=str(row["content"]),
         created_at=str(row["created_at"]),
         mode=str(row["mode"]),
+    )
+
+
+def _context_from_row(row: sqlite3.Row) -> ContextRecord:
+    return ContextRecord(
+        id=int(row["id"]),
+        name=str(row["name"]),
+        domain=str(row["domain"]),
+        scene=str(row["scene"]),
+        summary=str(row["summary"]),
+        instruction=str(row["instruction"]),
+        builtin=bool(row["builtin"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
     )
 
 

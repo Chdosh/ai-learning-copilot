@@ -116,6 +116,36 @@ def test_history_store_statistics():
         assert "报错" in stats["category_distribution"]
 
 
+def test_history_store_update_capture():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = HistoryStore(db_path=db_path)
+        capture_id = store.save_capture(
+            image_path="/tmp/fail.png",
+            source_text="hello",
+            translation="",
+            explanation="",
+            tags=["待处理"],
+            category="",
+        )
+        ok = store.update_capture(
+            capture_id,
+            translation="你好",
+            explanation="解释",
+            tags=["AI"],
+            category="AI概念",
+        )
+        assert ok is True
+        record = store.get_capture(capture_id)
+        assert record is not None
+        assert record.translation == "你好"
+        assert record.explanation == "解释"
+        assert record.tags == ["AI"]
+        assert record.category == "AI概念"
+        assert record.image_path == "/tmp/fail.png"
+        assert store.update_capture(99999, translation="", explanation="", tags=[], category="") is False
+
+
 def test_history_store_delete_capture():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
@@ -226,24 +256,3 @@ def test_advanced_search_has_followup():
         assert len(results) == 1
 
 
-def test_get_category_list():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        store = HistoryStore(db_path=db_path)
-        store.save_capture(
-            image_path="/tmp/test.png",
-            source_text="Error",
-            translation="错误",
-            explanation="解释",
-            category="报错",
-        )
-        store.save_capture(
-            image_path="/tmp/test2.png",
-            source_text="AI",
-            translation="AI",
-            explanation="解释",
-            category="AI概念",
-        )
-        cats = store.get_category_list()
-        assert "报错" in cats
-        assert "AI概念" in cats
