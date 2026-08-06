@@ -382,7 +382,13 @@ class HistoryStore:
 
         if has_followup:
             conditions.append(
-                "EXISTS (SELECT 1 FROM conversations WHERE conversations.capture_id = captures.id)"
+                "EXISTS ("
+                "SELECT 1 FROM messages "
+                "JOIN conversations ON conversations.id = messages.conversation_id "
+                "WHERE conversations.capture_id = captures.id "
+                "AND messages.role = 'user' "
+                "AND messages.mode != 'capture'"
+                ")"
             )
 
         where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""

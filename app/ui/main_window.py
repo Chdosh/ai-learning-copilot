@@ -363,7 +363,7 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(144)
+        sidebar.setFixedWidth(116)
         sidebar.setStyleSheet(f"QFrame#sidebar {{ background: {CARD}; }}")
         sidebar_layout = QVBoxLayout(sidebar)
         sidebar_layout.setContentsMargins(8, 12, 8, 12)
@@ -372,13 +372,12 @@ class MainWindow(QMainWindow):
         self.nav_buttons: list[QPushButton] = []
         self.pages = QStackedWidget()
         self.overview_page = OverviewPage(self.history_store, self.settings_service)
-        self.overview_page.open_popup.connect(self._reopen_popup_for_capture)
         self.workbench_page = WorkbenchPage(self.history_store, self.settings_service)
         self.workbench_page.request_screenshot.connect(self.start_capture)
         self.workbench_page.text_learn.connect(self._on_text_learn)
         self.workbench_page.context_changed.connect(self._on_context_changed)
         self.workbench_page.open_summary_dialog.connect(self._open_context_dialog_from_summary)
-        self._add_page(sidebar_layout, "学习概览", self.overview_page)
+        self._add_page(sidebar_layout, "获取", self.overview_page)
         self._add_page(sidebar_layout, "工作台", self.workbench_page)
         self._add_page(sidebar_layout, "术语本", self._build_terms_page())
         self._add_page(sidebar_layout, "设置", self._build_settings_page())
@@ -388,6 +387,8 @@ class MainWindow(QMainWindow):
         font_row.setSpacing(8)
         smaller_font = _mini_button("A-")
         larger_font = _mini_button("A+")
+        smaller_font.setFixedSize(30, 30)
+        larger_font.setFixedSize(30, 30)
         smaller_font.clicked.connect(lambda: self.adjust_text_size(-1))
         larger_font.clicked.connect(lambda: self.adjust_text_size(1))
         font_row.addWidget(smaller_font)
@@ -400,24 +401,39 @@ class MainWindow(QMainWindow):
         stats_card.setStyleSheet(
             f"""
             QFrame#sidebarCard {{
-                background: {CARD};
-                border: 1px solid {BORDER};
-                border-radius: {RADIUS_MD};
-                padding: 10px;
+                background: transparent;
+                border: none;
+                border-radius: 0;
             }}
             """
         )
         stats_grid = QGridLayout(stats_card)
-        stats_grid.setContentsMargins(8, 6, 8, 6)
-        stats_grid.setHorizontalSpacing(8)
-        stats_grid.setVerticalSpacing(4)
-        stats_title = QLabel("学习统计")
+        stats_grid.setContentsMargins(0, 4, 0, 0)
+        stats_grid.setHorizontalSpacing(10)
+        stats_grid.setVerticalSpacing(1)
+        stats_title = QLabel("概览")
         stats_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: {FONT_BODY};")
         stats_grid.addWidget(stats_title, 0, 0, 1, 2)
-        self.sidebar_stats_value = QLabel("")
-        self.sidebar_stats_value.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        self.sidebar_stats_value.setWordWrap(True)
-        stats_grid.addWidget(self.sidebar_stats_value, 1, 0, 1, 2)
+        self.sidebar_stat_labels: dict[str, QLabel] = {}
+        stat_items = [
+            ("today_captures", "今日"),
+            ("week_captures", "本周"),
+            ("month_captures", "本月"),
+            ("total_terms", "术语"),
+            ("favorite_terms", "收藏"),
+        ]
+        for index, (key, label_text) in enumerate(stat_items):
+            row = 1 + (index // 2) * 2
+            column = index % 2
+            value_label = QLabel("0")
+            value_label.setStyleSheet(
+                f"color: {TEXT}; font-size: {FONT_BODY};"
+            )
+            caption = QLabel(label_text)
+            caption.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+            stats_grid.addWidget(value_label, row, column)
+            stats_grid.addWidget(caption, row + 1, column)
+            self.sidebar_stat_labels[key] = value_label
         sidebar_layout.addWidget(stats_card)
 
         main_area = QWidget()
@@ -428,7 +444,7 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("就绪")
         self.status_label.setFixedHeight(24)
         self.status_label.setStyleSheet(
-            f"background: {BG}; color:{MUTED}; padding:0 16px; font-size: {FONT_MICRO};"
+            f"background: {BORDER_LIGHT}; color:{MUTED}; padding:0 16px; font-size: {FONT_MICRO};"
         )
         main_layout.addWidget(self.status_label)
 
@@ -468,12 +484,12 @@ class MainWindow(QMainWindow):
         )
 
     def adjust_text_size(self, delta: int) -> None:
-        self.ui_font_size = max(11, min(17, self.ui_font_size + delta))
+        self.ui_font_size = max(10, min(17, self.ui_font_size + delta))
         self._apply_text_size()
         self.result_window.adjust_text_size(delta)
         if hasattr(self, "terms_table"):
             self.refresh_terms()
-        self.status_label.setText(f"文本大小：{self.ui_font_size}px")
+        self.status_label.setText("文字大小已调整。")
 
     def _add_page(self, sidebar_layout: QVBoxLayout, title: str, page: QWidget) -> None:
         index = self.pages.addWidget(page)
@@ -1650,11 +1666,11 @@ class MainWindow(QMainWindow):
             from ctypes import wintypes
 
             hwnd = wintypes.HWND(int(self.winId()))
-            caption = ctypes.c_uint(colorref(BG))
+            caption = ctypes.c_uint(colorref(CARD))
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption)
             )
-            border = ctypes.c_uint(colorref(BG))
+            border = ctypes.c_uint(colorref(CARD))
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 hwnd, 34, ctypes.byref(border), ctypes.sizeof(border)
             )
@@ -1665,32 +1681,12 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-    def _reopen_popup_for_capture(self, capture_id: int) -> None:
-        record = self.history_store.get_capture(capture_id)
-        if record is None:
-            return
-        payload = {
-            "capture_id": record.id,
-            "conversation_id": self.history_store.get_conversation_id_for_capture(record.id),
-            "image_path": record.image_path,
-            "source_text": record.source_text,
-            "translation": record.translation,
-            "explanation": record.explanation,
-            "terms": [],
-            "tags": record.tags,
-            "learning_tip": "",
-        }
-        self._last_payload = payload
-        self.result_window.set_result(payload)
-
     def _refresh_sidebar_stats(self) -> None:
-        if not hasattr(self, "sidebar_stats_value"):
+        if not hasattr(self, "sidebar_stat_labels"):
             return
         stats = self.history_store.get_statistics()
-        self.sidebar_stats_value.setText(
-            f"今日 {stats['today_captures']} · 本周 {stats['week_captures']} · "
-            f"本月 {stats['month_captures']}\n术语 {stats['total_terms']} · 收藏 {stats['favorite_terms']}"
-        )
+        for key, label in self.sidebar_stat_labels.items():
+            label.setText(str(stats[key]))
 
     def export_markdown(self) -> None:
         records = self.history_store.search_captures(limit=1000)
@@ -1820,15 +1816,18 @@ def _danger_button(text: str) -> QPushButton:
 def _mini_button(text: str) -> QPushButton:
     button = QPushButton(text)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setFixedHeight(32)
+    button.setFixedSize(30, 30)
     button.setStyleSheet(
         f"""
         QPushButton {{
             background: {CARD};
             border: 1px solid {BORDER};
             border-radius: {RADIUS_MD};
-            padding: 2px 8px;
+            padding: 0;
+            min-width: 0;
             color: {TEXT_SECONDARY};
+            font-family: "Segoe UI", Arial, sans-serif;
+            font-size: 12px;
         }}
         QPushButton:hover {{
             border-color: {PRIMARY};

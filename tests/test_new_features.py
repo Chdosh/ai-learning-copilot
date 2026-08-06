@@ -256,3 +256,20 @@ def test_advanced_search_has_followup():
         assert len(results) == 1
 
 
+def test_advanced_search_has_followup_excludes_capture_message():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        store = HistoryStore(db_path=db_path)
+        capture_id = store.save_capture(
+            image_path="/tmp/test.png",
+            source_text="test",
+            translation="测试",
+            explanation="解释",
+        )
+        conversation_id = store.create_conversation(capture_id, title="test")
+        store.add_message(conversation_id, "user", "test", mode="capture")
+
+        results = store.search_captures_advanced(has_followup=True)
+        assert results == []
+
+

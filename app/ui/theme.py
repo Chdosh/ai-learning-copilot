@@ -135,6 +135,20 @@ QComboBox::drop-down {{
     border: none;
     width: 22px;
 }}
+QComboBox::down-arrow {{
+    image: none;
+    width: 0px;
+    height: 0px;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid {MUTED};
+}}
+QComboBox#filterCombo::down-arrow {{
+    image: none;
+    width: 0px;
+    height: 0px;
+    border: none;
+}}
 {button_qss()}
 QPushButton#primaryButton {{
     background: {PRIMARY};
