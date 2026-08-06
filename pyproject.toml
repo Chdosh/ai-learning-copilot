@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-learning-copilot"
-version = "0.1.0"
+version = "0.3.0"
 description = "A fast desktop screenshot translator and AI learning assistant."
 readme = "README.md"
 requires-python = ">=3.10"
