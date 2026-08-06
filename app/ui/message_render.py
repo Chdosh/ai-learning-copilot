@@ -5,26 +5,31 @@ import html
 import re
 
 from app.services.ai_client import compact_line_breaks
+from app.ui.theme import BORDER_LIGHT, DISABLED, MUTED, TEXT, TEXT_SECONDARY
 
 
 DOC_STYLESHEET = (
-    "body { margin: 0; color: #334155; }"
-    ".lead { margin: 0 0 4px 0; color: #101828; font-size: 1em; "
+    f"body {{ margin: 0; color: {TEXT_SECONDARY}; }}"
+    f".lead {{ margin: 0 0 4px 0; color: {TEXT}; font-size: 1em; "
     " line-height: 1.25; }"
-    ".body-line { margin: 0; color: #4b5563; font-size: 1em; "
+    f".body-line {{ margin: 0; color: {TEXT_SECONDARY}; font-size: 1em; "
     "line-height: 1.3; }"
-    ".meta-label { margin: 5px 0 2px 0; color: #9ca3af; "
+    f".meta-label {{ margin: 5px 0 2px 0; color: {DISABLED}; "
     "font-size: 0.77em;  }"
-    ".meta-line { margin: 0; color: #6b7280; font-size: 0.92em; "
+    f".meta-line {{ margin: 0; color: {MUTED}; font-size: 0.92em; "
     "line-height: 1.3; }"
-    ".term-row { margin: 2px 0; color: #4b5563; font-size: 0.92em; "
+    f".term-row {{ margin: 2px 0; color: {TEXT_SECONDARY}; font-size: 0.92em; "
     "line-height: 1.3; }"
-    ".term-name { color: #1f2937;  }"
-    ".command { margin: 3px 0 2px 0; padding: 3px 7px; color: #26384c; "
-    "background: #f3f4f6; font-family: 'Cascadia Mono', Consolas, monospace; "
+    f".term-name {{ color: {TEXT};  }}"
+    f"    .command {{ margin: 3px 0 2px 0; padding: 3px 7px; color: {TEXT}; "
+    f"background: {BORDER_LIGHT}; font-family: 'Cascadia Mono', Consolas, monospace; "
     "font-size: 0.92em; white-space: pre-wrap; }"
-    "code { color: #26384c; background: #f3f4f6; "
+    f"code {{ color: {TEXT}; background: {BORDER_LIGHT}; "
     "font-family: 'Cascadia Mono', Consolas, monospace; }"
+    ".source-block { margin: 0; padding: 8px 10px; "
+    f"background: {BORDER_LIGHT}; border-radius: 6px; "
+    "color: #4b5563; font-size: 0.92em; line-height: 1.35; "
+    "white-space: pre-wrap; }"
 )
 
 _CODE_SYNTAX = re.compile(
@@ -124,6 +129,14 @@ def split_lead(text: str) -> tuple[str, str]:
     if match:
         return match.group(1).strip(), match.group(2).strip()
     return normalized, ""
+
+
+def render_source_block(text: str) -> str:
+    """原文引用块：灰底、等宽偏好、整体一块（输入 vs 输出的视觉降级）。"""
+    if not text or not text.strip():
+        return '<div class="source-block">（无原文）</div>'
+    escaped = html.escape(compact_line_breaks(text).strip())
+    return f'<div class="source-block">{escaped}</div>'
 
 
 def render_lines(text: str, *, meta: bool = False) -> str:

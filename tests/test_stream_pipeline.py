@@ -247,10 +247,6 @@ def test_result_window_uses_generic_visual_hierarchy() -> None:
     assert "Python 找不到准备导入的模块。" in visible_text
     assert "\n\n" not in visible_text
     assert "学习建议" not in visible_text
-    assert window.tip_toggle.isVisible()
-    assert window.tip_content.isHidden()
-
-    window.tip_toggle.click()
     assert window.tip_content.isVisible()
     assert window.tip_content.text() == "了解 ModuleNotFoundError 的模块查找规则。"
 

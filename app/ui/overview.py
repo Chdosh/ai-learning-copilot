@@ -1,6 +1,8 @@
-"""学习概览页：会话学习视图（会话列表 + 会话流 + 上下文面板 + 学习上下文切换）。
+"""学习概览页：会话学习视图（会话列表 + 会话流 + 术语/标签抽屉）。
 
 新建学习入口（截图/文本）在工作台页，本页负责查看与深入学习。
+布局：左侧会话索引（固定 216px） + 右侧会话流（阅读面）。
+原图内联在会话流顶部，术语/标签在底部折叠抽屉，操作在页头菜单。
 """
 from __future__ import annotations
 
@@ -12,11 +14,13 @@ from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTextBrowser,
@@ -27,11 +31,37 @@ from PySide6.QtWidgets import (
 
 from app.services.history_store import HistoryStore
 from app.services.settings import SettingsService
-from app.ui.message_render import DOC_STYLESHEET, build_result_html, render_lines
-from app.ui.theme import BG, BLUE, BORDER, BORDER_LIGHT, MUTED
+from app.ui.message_render import DOC_STYLESHEET, build_result_html, render_lines, render_source_block
+from app.ui.theme import (
+    BG,
+    BORDER,
+    BORDER_LIGHT,
+    CARD,
+    DANGER,
+    DISABLED,
+    FONT_BODY,
+    FONT_MICRO,
+    FONT_TITLE,
+    MUTED,
+    PRIMARY,
+    PRIMARY_SOFT,
+    RADIUS_MD,
+    TEXT,
+    button_qss,
+    chip_qss,
+)
 from app.ui.workers import FollowupWorker
 
-FILTERS = ["全部", "今天", "本周", "有追问"]
+_GHOST_QSS = button_qss()
+
+
+class _ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
 
 
 def _compact(text: str, limit: int) -> str:
@@ -42,9 +72,9 @@ def _compact(text: str, limit: int) -> str:
 def _session_text(record) -> str:
     title = (record.source_text or record.translation or "截图").strip().splitlines()
     title = title[0] if title else "截图"
-    preview = record.translation or record.explanation or record.source_text
-    category = f"  [{record.category}]" if record.category else ""
-    return f"{_compact(title, 30)}\n{_compact(preview, 34)}{category}"
+    created = (record.created_at or "").replace("T", " ")[:16]
+    category = f" [{record.category}]" if record.category else ""
+    return f"{_compact(title, 22)}\n{created}{category}"
 
 
 class OverviewPage(QWidget):
@@ -71,17 +101,27 @@ class OverviewPage(QWidget):
         top_bar = QWidget()
         top_bar.setStyleSheet(f"background: {BG};")
         top_layout = QHBoxLayout(top_bar)
-        top_layout.setContentsMargins(18, 12, 18, 4)
+        top_layout.setContentsMargins(16, 8, 16, 4)
+        self.direction_label = QLabel("")
+        self.direction_label.setStyleSheet(
+            f"color: {MUTED}; font-size: {FONT_MICRO}; background: {BORDER_LIGHT};"
+            f"border-radius: {RADIUS_MD}; padding: 2px 8px;"
+        )
+        top_layout.addWidget(self.direction_label)
         top_layout.addStretch(1)
-        self.domain_filter_label = QLabel("记录筛选")
-        self.domain_filter_label.setStyleSheet(f"color: {MUTED}; font-size: 13px;")
-        top_layout.addWidget(self.domain_filter_label)
-        self.domain_filter_combo = QComboBox()
-        self.domain_filter_combo.setMinimumWidth(180)
-        self.domain_filter_combo.setMaxVisibleItems(8)
-        self.domain_filter_combo.setToolTip("按内容领域筛选左侧历史记录")
-        self.domain_filter_combo.currentIndexChanged.connect(self._on_domain_filter_selected)
-        top_layout.addWidget(self.domain_filter_combo)
+
+        self.actions_menu_button = QPushButton("操作 ▾")
+        self.actions_menu_button.setStyleSheet(_GHOST_QSS)
+        self.actions_menu_button.setEnabled(False)
+        self.actions_menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.actions_menu = QMenu(self.actions_menu_button)
+        self.actions_menu.addAction("复制结果", self.copy_result)
+        self.actions_menu.addAction("打开弹窗", self._open_popup)
+        self.actions_menu.addSeparator()
+        delete_action = self.actions_menu.addAction("删除记录")
+        delete_action.triggered.connect(self._delete_capture)
+        self.actions_menu_button.clicked.connect(self._show_actions_menu)
+        top_layout.addWidget(self.actions_menu_button)
         layout.addWidget(top_bar)
 
         columns = QHBoxLayout()
@@ -89,45 +129,57 @@ class OverviewPage(QWidget):
         columns.setSpacing(0)
         columns.addWidget(self._build_session_panel())
         columns.addWidget(self._build_center_panel(), 1)
-        columns.addWidget(self._build_context_panel())
         layout.addLayout(columns, 1)
 
         self.setStyleSheet(
             "QListWidget::item { padding: 7px 8px; }"
-            "QListWidget::item:selected { background: #eff4ff; color: #101828; }"
+            f"QListWidget::item:selected {{ background: {PRIMARY_SOFT}; color: {TEXT}; }}"
         )
+
+    def _show_actions_menu(self) -> None:
+        self.actions_menu.exec(self.actions_menu_button.mapToGlobal(self.actions_menu_button.rect().bottomLeft()))
 
     def _build_session_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setFixedWidth(280)
-        panel.setStyleSheet(f"background: #ffffff; border-right: 1px solid {BORDER};")
+        panel.setFixedWidth(216)
+        panel.setStyleSheet(f"background: {CARD};")
         v = QVBoxLayout(panel)
-        v.setContentsMargins(10, 12, 10, 12)
+        v.setContentsMargins(12, 12, 12, 12)
         v.setSpacing(8)
 
         v.addWidget(QLabel("会话"))
 
         self.session_search = QLineEdit()
         self.session_search.setPlaceholderText("搜索记录...")
-        self.session_search.setStyleSheet(f"padding: 6px 8px; border: 1px solid {BORDER}; border-radius: 8px;")
+        self.session_search.setStyleSheet(
+            f"padding: 3px 2px; border: 1px solid {BORDER}; border-radius: {RADIUS_MD};"
+        )
         self.session_search.returnPressed.connect(self.refresh_sessions)
         v.addWidget(self.session_search)
 
-        chips = QHBoxLayout()
-        chips.setSpacing(6)
-        self.filter_buttons: dict[str, QPushButton] = {}
-        for label in FILTERS:
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setChecked(label == self._active_filter)
-            button.setStyleSheet(
-                f"QPushButton {{ border: 1px solid {BORDER}; border-radius: 16px; padding: 3px 12px; background: #fff; }}"
-                f"QPushButton:checked {{ background: {BLUE}; color: #fff; border-color: {BLUE}; }}"
-            )
-            button.clicked.connect(lambda checked=False, l=label: self._apply_filter(l))
-            self.filter_buttons[label] = button
-            chips.addWidget(button)
-        v.addLayout(chips)
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        self.time_filter_combo = QComboBox()
+        self.time_filter_combo.addItems(["全部", "今天", "本周"])
+        self.time_filter_combo.currentIndexChanged.connect(self._on_time_filter_changed)
+        filter_row.addWidget(self.time_filter_combo, 1)
+        self.domain_filter_combo = QComboBox()
+        self.domain_filter_combo.setMaxVisibleItems(8)
+        self.domain_filter_combo.setToolTip("按内容领域筛选左侧历史记录")
+        self.domain_filter_combo.currentIndexChanged.connect(self._on_domain_filter_selected)
+        filter_row.addWidget(self.domain_filter_combo, 1)
+        v.addLayout(filter_row)
+
+        followup_row = QHBoxLayout()
+        followup_row.setSpacing(8)
+        self.followup_filter_toggle = QPushButton("有追问")
+        self.followup_filter_toggle.setCheckable(True)
+        self.followup_filter_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.followup_filter_toggle.setStyleSheet(chip_qss())
+        self.followup_filter_toggle.toggled.connect(self._on_followup_filter_toggled)
+        followup_row.addWidget(self.followup_filter_toggle)
+        followup_row.addStretch(1)
+        v.addLayout(followup_row)
 
         self.session_list = QListWidget()
         self.session_list.itemClicked.connect(self._on_session_clicked)
@@ -138,13 +190,26 @@ class OverviewPage(QWidget):
         panel = QWidget()
         panel.setStyleSheet(f"background: {BG};")
         v = QVBoxLayout(panel)
-        v.setContentsMargins(18, 16, 18, 16)
+        v.setContentsMargins(16, 16, 16, 16)
         v.setSpacing(8)
 
+        self.center_image = _ClickableLabel("")
+        self.center_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.center_image.setFixedHeight(80)
+        self.center_image.setVisible(False)
+        self.center_image.setStyleSheet(
+            f"background: {BORDER_LIGHT}; border-radius: {RADIUS_MD}; color: {DISABLED}; font-size: {FONT_MICRO};"
+        )
+        self.center_image.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.center_image.setToolTip("点击查看原图")
+        self.center_image.clicked.connect(self._open_popup)
+        v.addWidget(self.center_image)
+
         self.header_title = QLabel("选择左侧会话开始学习")
-        self.header_title.setStyleSheet("font-size: 16px; ")
+        self.header_title.setStyleSheet(f"font-size: {FONT_TITLE}; ")
         self.header_meta = QLabel("")
         self.header_meta.setStyleSheet(f"color: {MUTED}; ")
+        self.header_meta.setWordWrap(True)
         v.addWidget(self.header_title)
         v.addWidget(self.header_meta)
 
@@ -161,17 +226,28 @@ class OverviewPage(QWidget):
         )
         v.addWidget(self.message_browser, 1)
 
+        terms_label = QLabel("术语")
+        terms_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        v.addWidget(terms_label)
+        self.context_terms = QListWidget()
+        self.context_terms.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.context_terms.setMaximumHeight(80)
+        self.context_terms.setStyleSheet("QListWidget { background: transparent; }")
+        v.addWidget(self.context_terms)
+
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
         self.followup_input = QLineEdit()
         self.followup_input.setPlaceholderText("继续追问...")
         self.followup_input.setStyleSheet(
-            f"padding: 8px 10px; border: 1px solid {BORDER}; border-radius: 8px; background: #fff;"
+            f"padding: 8px 10px; border: 1px solid {BORDER}; border-radius: {RADIUS_MD}; background: {CARD};"
         )
         self.followup_input.returnPressed.connect(self.send_followup)
         send_button = QPushButton("发送")
+        send_button.setObjectName("primaryButton")
         send_button.setStyleSheet(
-            f"background: {BLUE}; color: #fff; border: 0; border-radius: 8px; padding: 0 16px; "
+            f"QPushButton#primaryButton {{ background: {PRIMARY}; color: #fff; border: 0; "
+            f"border-radius: {RADIUS_MD}; padding: 0 16px; }}"
         )
         send_button.clicked.connect(self.send_followup)
         input_row.addWidget(self.followup_input, 1)
@@ -179,87 +255,42 @@ class OverviewPage(QWidget):
         v.addLayout(input_row)
         return panel
 
-    def _build_context_panel(self) -> QWidget:
-        panel = QWidget()
-        panel.setFixedWidth(250)
-        panel.setStyleSheet(f"background: #ffffff; border-left: 1px solid {BORDER};")
-        v = QVBoxLayout(panel)
-        v.setContentsMargins(14, 14, 14, 14)
-        v.setSpacing(8)
-
-        v.addWidget(self._label("上下文"))
-
-        self.context_image = QLabel("截图预览")
-        self.context_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.context_image.setFixedHeight(110)
-        self.context_image.setStyleSheet(f"background: {BORDER_LIGHT}; border-radius: 8px; color: #9ca3af; ")
-        v.addWidget(self.context_image)
-
-        self.context_source = QTextEdit()
-        self.context_source.setReadOnly(True)
-        self.context_source.setPlaceholderText("OCR 原文")
-        self.context_source.setMaximumHeight(150)
-        self.context_source.setStyleSheet(f"border: 1px solid {BORDER}; border-radius: 8px; ")
-        v.addWidget(self.context_source)
-
-        v.addWidget(self._label("术语"))
-        self.context_terms = QListWidget()
-        self.context_terms.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        self.context_terms.setMaximumHeight(180)
-        v.addWidget(self.context_terms, 1)
-
-        self.context_tags = QLabel("")
-        self.context_tags.setWordWrap(True)
-        self.context_tags.setStyleSheet(f"color: {MUTED}; ")
-        v.addWidget(self.context_tags)
-
-        actions = QHBoxLayout()
-        actions.setSpacing(6)
-        copy_button = QPushButton("复制")
-        copy_button.clicked.connect(self.copy_result)
-        popup_button = QPushButton("弹窗")
-        popup_button.clicked.connect(self._open_popup)
-        delete_button = QPushButton("删除")
-        delete_button.setStyleSheet("color: #b54747;")
-        delete_button.clicked.connect(self._delete_capture)
-        for button in (copy_button, popup_button, delete_button):
-            button.setStyleSheet(
-                f"{button.styleSheet()}border: 1px solid {BORDER}; border-radius: 8px; padding: 5px 10px; background: #fff; "
-            )
-        actions.addWidget(copy_button)
-        actions.addWidget(popup_button)
-        actions.addWidget(delete_button)
-        v.addLayout(actions)
-        return panel
-
-    @staticmethod
-    def _label(text: str) -> QLabel:
-        return QLabel(text)
-
     def refresh(self) -> None:
         self.refresh_domain_filter()
+        self.refresh_direction_label()
         self.refresh_sessions()
 
-    def _apply_filter(self, label: str) -> None:
-        self._active_filter = label
-        for name, button in self.filter_buttons.items():
-            button.setChecked(name == label)
+    def refresh_direction_label(self) -> None:
+        settings = self.settings_service.load()
+        name = "通用"
+        if settings.current_context_id is not None:
+            context = self.history_store.get_context(settings.current_context_id)
+            if context is not None:
+                name = context.name
+        self.direction_label.setText(f"学习方向：{name}")
+
+    def _on_time_filter_changed(self, index: int) -> None:
+        self._active_filter = self.time_filter_combo.itemText(index)
+        self.refresh_sessions()
+
+    def _on_followup_filter_toggled(self, checked: bool) -> None:
         self.refresh_sessions()
 
     def refresh_sessions(self) -> None:
         query = self.session_search.text().strip()
-        filter_label = self._active_filter
+        time_label = self._active_filter
+        has_followup = self.followup_filter_toggle.isChecked()
         records = self.history_store.search_captures_advanced(
             query=query,
             domain=self._domain_filter,
-            has_followup=(filter_label == "有追问"),
+            has_followup=has_followup,
             limit=1000,
         )
-        if filter_label == "今天":
+        if time_label == "今天":
             from datetime import datetime
             today = datetime.now().strftime("%Y-%m-%d")
             records = [r for r in records if (r.created_at or "").startswith(today)]
-        elif filter_label == "本周":
+        elif time_label == "本周":
             from datetime import datetime, timedelta
             week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
             records = [r for r in records if (r.created_at or "")[:10] >= week_start]
@@ -269,6 +300,9 @@ class OverviewPage(QWidget):
             item = QListWidgetItem(_session_text(record))
             item.setData(Qt.ItemDataRole.UserRole, record.id)
             self.session_list.addItem(item)
+
+        if records:
+            self.select_capture(records[0].id)
 
     def _on_session_clicked(self, item: QListWidgetItem) -> None:
         capture_id = item.data(Qt.ItemDataRole.UserRole)
@@ -285,33 +319,35 @@ class OverviewPage(QWidget):
         self.current_conversation_id = self.history_store.get_conversation_id_for_capture(capture_id)
         self._followup_stream = {}
         self.followup_input.setEnabled(True)
+        self.actions_menu_button.setEnabled(True)
 
         title = (record.source_text or record.translation or "截图").strip().splitlines()
         self.header_title.setText(_compact(title[0] if title else "截图", 50))
-        meta = f"{record.created_at}"
+        meta = f"{record.created_at}".replace("T", " ")[:16]
         if record.category:
             meta += f"  ·  {record.category}"
+        if record.tags:
+            meta += f"  ·  {'、'.join(record.tags[:5])}"
         self.header_meta.setText(meta)
 
-        self.context_source.setPlainText(record.source_text or "（无）")
-        self._load_context_image(record.image_path or "")
+        self._load_center_image(record.image_path or "")
         self._render_conversation()
         self._load_context_terms()
 
-    def _load_context_image(self, image_path: str) -> None:
-        self.context_image.setPixmap(QPixmap())
+    def _load_center_image(self, image_path: str) -> None:
+        self.center_image.setPixmap(QPixmap())
+        self.center_image.setVisible(False)
         if image_path and Path(image_path).exists():
             pixmap = QPixmap(image_path)
             if not pixmap.isNull():
                 scaled = pixmap.scaled(
-                    self.context_image.width(), self.context_image.height(),
+                    self.center_image.width(), self.center_image.height(),
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                self.context_image.setPixmap(scaled)
-                self.context_image.setText("")
+                self.center_image.setPixmap(scaled)
+                self.center_image.setVisible(True)
                 return
-        self.context_image.setText("无截图")
 
     def _load_context_terms(self) -> None:
         self.context_terms.clear()
@@ -319,6 +355,10 @@ class OverviewPage(QWidget):
         for term in terms[:8]:
             item = QListWidgetItem(f"{term.get('term', '')} · {term.get('chinese_name', '')}")
             self.context_terms.addItem(item)
+        if not terms:
+            placeholder = QListWidgetItem("（无术语）")
+            placeholder.setForeground(__import__("PySide6.QtGui", fromlist=["QColor"]).QColor(MUTED))
+            self.context_terms.addItem(placeholder)
 
     def _capture_terms(self) -> list[dict]:
         if self.current_capture is None:
@@ -344,12 +384,12 @@ class OverviewPage(QWidget):
         record = self.current_capture
         parts: list[str] = []
         parts.append('<div class="meta-label">原文</div>')
-        parts.append(render_lines(record.source_text or "（无）"))
+        parts.append(render_source_block(record.source_text or ""))
         parts.append(build_result_html(
             translation=record.translation or "",
             explanation=record.explanation or "",
             source_text=record.source_text or "",
-            terms=self._capture_terms(),
+            terms=[],
         ))
 
         conversation_id = self.current_conversation_id
@@ -379,7 +419,7 @@ class OverviewPage(QWidget):
                     explanation=pending.get("explanation", ""),
                 ))
             else:
-                parts.append('<div class="body-line" style="color:#8995a5;">思考中…</div>')
+                parts.append(f'<div class="body-line" style="color:{MUTED};">思考中…</div>')
 
         self.message_browser.setHtml("".join(parts))
         cursor = self.message_browser.textCursor()
@@ -421,7 +461,7 @@ class OverviewPage(QWidget):
         self._followup_stream = {}
         if payload.get("error"):
             self.message_browser.insertHtml(
-                f'<div class="body-line" style="color:#b54747;">{payload["error"]}</div>'
+                f'<div class="body-line" style="color:{DANGER};">{payload["error"]}</div>'
             )
         else:
             self.followup_input.setEnabled(True)
@@ -451,10 +491,10 @@ class OverviewPage(QWidget):
         self.header_title.setText("选择左侧会话开始学习")
         self.header_meta.setText("")
         self.message_browser.setHtml("")
-        self.context_source.clear()
+        self.center_image.setPixmap(QPixmap())
+        self.center_image.setVisible(False)
         self.context_terms.clear()
-        self.context_tags.setText("")
-        self.context_image.setText("无截图")
+        self.actions_menu_button.setEnabled(False)
         self.refresh()
 
     def refresh_domain_filter(self) -> None:

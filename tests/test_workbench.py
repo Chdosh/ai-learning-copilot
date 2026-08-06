@@ -53,8 +53,9 @@ def test_overview_refreshes_with_data(tmp_path) -> None:
     assert overview.session_list.count() >= 1
     assert overview.domain_filter_combo.itemData(0) == ""
     assert overview.domain_filter_combo.findData("通用") >= 0
-    assert all(not button.isHidden() for button in overview.filter_buttons.values())
-    assert "筛选" in overview.domain_filter_label.text()
+    assert not overview.followup_filter_toggle.isHidden()
+    assert overview.time_filter_combo.count() == 3
+    assert "方向" in overview.direction_label.text()
     overview.deleteLater()
     app.processEvents()
 
@@ -144,7 +145,8 @@ def test_overview_selects_and_renders_conversation(tmp_path) -> None:
     assert "Token limit exceeded" in text
     assert "怎么解决？" in text
     assert "把长内容拆成几段。" in text
-    assert overview.context_source.toPlainText() == "Token limit exceeded"
+    assert overview.header_meta.text() != ""
+    assert overview.actions_menu_button.isEnabled()
     overview.deleteLater()
     app.processEvents()
 
@@ -208,23 +210,24 @@ def test_workbench_direction_switch_creates_and_reuses(tmp_path) -> None:
     settings_service = SettingsService(store)
     workbench = WorkbenchPage(store, settings_service)
 
-    assert "通用" in workbench._direction_buttons
-    assert "生物" in workbench._direction_buttons
+    assert "通用" in [workbench.direction_combo.itemText(i) for i in range(workbench.direction_combo.count())]
+    assert "生物" in [workbench.direction_combo.itemText(i) for i in range(workbench.direction_combo.count())]
 
     changed: list = []
     workbench.context_changed.connect(changed.append)
 
-    workbench._direction_buttons["生物"].click()
+    bio_index = workbench.direction_combo.findText("生物")
+    workbench.direction_combo.setCurrentIndex(bio_index)
     current = settings_service.load().current_context_id
     assert current is not None
     assert store.get_context(current).domain == "生物"
     assert changed == [current]
 
-    workbench._direction_buttons["生物"].click()
+    workbench._switch_direction("生物")
     bio_domains = [c.domain for c in store.list_contexts() if not c.builtin]
     assert bio_domains.count("生物") == 1
 
-    workbench._direction_buttons["通用"].click()
+    workbench._switch_direction("通用")
     assert settings_service.load().current_context_id is None
 
     workbench.deleteLater()
@@ -238,7 +241,7 @@ def test_workbench_direction_prefers_existing_context(tmp_path) -> None:
     custom = store.save_context(name="生物论文", domain="生物", scene="学术论文")
 
     workbench = WorkbenchPage(store, settings_service)
-    workbench._direction_buttons["生物"].click()
+    workbench._switch_direction("生物")
 
     assert settings_service.load().current_context_id == custom
     workbench.deleteLater()
@@ -259,13 +262,12 @@ def test_workbench_detail_box_shows_current_context(tmp_path) -> None:
     settings_service.set_current_context(context_id)
 
     workbench = WorkbenchPage(store, settings_service)
-    detail = workbench.context_detail_box.toPlainText()
-    assert "生物论文" in detail
+    detail = workbench.context_detail_label.text()
     assert "CRISPR 基因编辑" in detail
     assert "术语给中文对照" in detail
 
-    workbench._direction_buttons["通用"].click()
-    assert "通用" in workbench.context_detail_box.toPlainText()
+    workbench._switch_direction("通用")
+    assert "通用" in workbench.context_detail_label.text()
     workbench.deleteLater()
     app.processEvents()
 

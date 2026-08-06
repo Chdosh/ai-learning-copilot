@@ -34,7 +34,22 @@ from app.ui.message_render import (
     render_lines,
     split_lead,
 )
-from app.ui.theme import BLUE, BLUE_DARK, BLUE_SOFT, BORDER, BORDER_LIGHT, MUTED, TEXT
+from app.ui.theme import (
+    BORDER,
+    BORDER_LIGHT,
+    CARD,
+    DANGER,
+    DANGER_SOFT,
+    DISABLED,
+    MUTED,
+    PRIMARY,
+    PRIMARY_DARK,
+    PRIMARY_SOFT,
+    RADIUS_MD,
+    RADIUS_LG,
+    TEXT,
+    TEXT_SECONDARY,
+)
 
 
 class ResultWindow(QWidget):
@@ -67,7 +82,7 @@ class ResultWindow(QWidget):
         self.setMaximumWidth(760)
 
         outer_layout = QVBoxLayout(self)
-        outer_layout.setContentsMargins(6, 6, 6, 6)
+        outer_layout.setContentsMargins(8, 8, 8, 8)
         self.card = QFrame()
         self.card.setObjectName("resultCard")
         outer_layout.addWidget(self.card)
@@ -78,8 +93,8 @@ class ResultWindow(QWidget):
         self.card.setGraphicsEffect(shadow)
 
         layout = QVBoxLayout(self.card)
-        layout.setContentsMargins(6, 4, 6, 6)
-        layout.setSpacing(2)
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(4)
 
         header = QHBoxLayout()
         header.setSpacing(4)
@@ -110,13 +125,6 @@ class ResultWindow(QWidget):
         self.text_browser.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         layout.addWidget(self.text_browser)
 
-        self.tip_toggle = QPushButton("▸ 补充说明")
-        self.tip_toggle.setObjectName("tipToggle")
-        self.tip_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.tip_toggle.clicked.connect(self._toggle_tip)
-        self.tip_toggle.hide()
-        layout.addWidget(self.tip_toggle, 0, Qt.AlignmentFlag.AlignLeft)
-
         self.tip_content = QLabel()
         self.tip_content.setObjectName("tipContent")
         self.tip_content.setWordWrap(True)
@@ -134,12 +142,13 @@ class ResultWindow(QWidget):
         self.send_button.setObjectName("primaryButton")
         self.send_button.clicked.connect(self._send_followup)
         self.retry_button = QPushButton("重试")
-        self.retry_button.setObjectName("primaryButton")
         self.retry_button.clicked.connect(self._send_retry)
         self.retry_button.hide()
         more_button = QPushButton("···")
         more_button.setObjectName("moreButton")
-        more_button.setFixedWidth(28)
+        more_button.setMinimumWidth(28)
+        more_button.setMaximumWidth(44)
+        more_button.setFixedHeight(24)
         self.more_button = more_button
         more_menu = QMenu(more_button)
         more_menu.setObjectName("resultMenu")
@@ -174,9 +183,8 @@ class ResultWindow(QWidget):
                 font-size: 13px;
             }}
             QFrame#resultCard {{
-                background: #ffffff;
-                border: 1px solid {BORDER};
-                border-radius: 12px;
+                background: {CARD};
+                border-radius: {RADIUS_LG};
             }}
             QWidget#resultWindow QLabel {{
                 color: {TEXT};
@@ -188,99 +196,89 @@ class ResultWindow(QWidget):
                 background: transparent;
                 border: 0;
                 padding: 0;
-                font-size: 10px;
+                font-size: 12px;
             }}
             QTextBrowser#resultBody {{
-                color: #334155;
+                color: {TEXT_SECONDARY};
                 background: transparent;
                 border: 0;
                 padding: 0 1px 0 1px;
-                selection-background-color: {BLUE_SOFT};
+                selection-background-color: {PRIMARY_SOFT};
             }}
-            QPushButton#tipToggle {{
-                min-height: 18px;
-                color: {MUTED};
-                background: transparent;
-                border: 0;
-                padding: 0;
-                font-size: 10px;
-                text-align: left;
-            }}
-            QPushButton#tipToggle:hover {{ color: {BLUE}; }}
             QLabel#tipContent {{
-                color: #475467;
-                background: #f4f6f8;
+                color: {TEXT_SECONDARY};
+                background: {BORDER_LIGHT};
                 border: 0;
-                border-radius: 8px;
+                border-radius: {RADIUS_MD};
                 padding: 5px 8px;
                 font-size: 12px;
             }}
             QLineEdit#followupInput {{
                 color: {TEXT};
-                background: #ffffff;
+                background: {CARD};
                 border: 1px solid {BORDER};
-                border-radius: 8px;
+                border-radius: {RADIUS_MD};
                 padding: 4px 8px;
-                selection-background-color: {BLUE_SOFT};
+                selection-background-color: {PRIMARY_SOFT};
             }}
-            QLineEdit#followupInput:focus {{ border-color: {BLUE}; }}
+            QLineEdit#followupInput:focus {{ border-color: {PRIMARY}; }}
             QWidget#resultWindow QPushButton {{
                 min-height: 24px;
-                border-radius: 8px;
+                border-radius: {RADIUS_MD};
                 padding: 0 9px;
-                font-size: 11px;
+                font-size: 12px;
             }}
             QPushButton#primaryButton {{
                 color: #ffffff;
-                background: {BLUE};
-                border: 1px solid {BLUE};
+                background: {PRIMARY};
+                border: 1px solid {PRIMARY};
             }}
-            QPushButton#primaryButton:hover {{ background: {BLUE_DARK}; }}
-            QPushButton#moreButton {{
+            QPushButton#primaryButton:hover {{ background: {PRIMARY_DARK}; }}
+            QWidget#resultWindow QPushButton#moreButton {{
                 color: {MUTED};
                 background: transparent;
                 border: 0;
-                padding: 0;
+                padding: 0 2px;
                 font-size: 14px;
             }}
-            QPushButton#moreButton:hover {{ color: {TEXT}; background: {BORDER_LIGHT}; }}
+            QWidget#resultWindow QPushButton#moreButton:hover {{ color: {TEXT}; background: {BORDER_LIGHT}; }}
             QPushButton#moreButton::menu-indicator {{
                 image: none;
                 width: 0;
                 height: 0;
             }}
             QPushButton#closeButton {{
-                color: #718096;
+                color: {DISABLED};
                 background: transparent;
                 border: 0;
                 padding: 0;
                 min-height: 0;
                 font-size: 16px;
             }}
-            QPushButton#closeButton:hover {{ color: #b54747; background: #fbeeee; }}
+            QPushButton#closeButton:hover {{ color: {TEXT}; background: {BORDER_LIGHT}; }}
             QMenu#resultMenu {{
-                color: #334155;
-                background: #ffffff;
+                color: {TEXT_SECONDARY};
+                background: {CARD};
                 border: 1px solid {BORDER};
-                border-radius: 8px;
+                border-radius: {RADIUS_MD};
                 padding: 5px;
             }}
             QMenu#resultMenu::item {{
                 padding: 6px 18px 6px 10px;
                 border-radius: 6px;
             }}
-            QMenu#resultMenu::item:selected {{ background: {BLUE_SOFT}; color: {BLUE}; }}
+            QMenu#resultMenu::item:selected {{ background: {PRIMARY_SOFT}; color: {PRIMARY}; }}
             QTextBrowser#resultBody QScrollBar:vertical {{
                 background: transparent;
                 width: 7px;
                 margin: 2px 0;
             }}
             QTextBrowser#resultBody QScrollBar::handle:vertical {{
-                background: #d0d5dd;
+                background: {DISABLED};
                 min-height: 24px;
                 border-radius: 3px;
             }}
-            QTextBrowser#resultBody QScrollBar::handle:vertical:hover {{ background: #98a2b3; }}
+            QTextBrowser#resultBody QScrollBar::handle:vertical:hover {{ background: {MUTED}; }}
             QTextBrowser#resultBody QScrollBar::add-line:vertical,
             QTextBrowser#resultBody QScrollBar::sub-line:vertical {{
                 height: 0;
@@ -317,7 +315,6 @@ class ResultWindow(QWidget):
     def _enter_loading(self) -> None:
         self._loading = True
         self.text_browser.setVisible(False)
-        self.tip_toggle.setVisible(False)
         self.tip_content.setVisible(False)
         self.followup_input.setVisible(False)
         self.send_button.setVisible(False)
@@ -422,7 +419,7 @@ class ResultWindow(QWidget):
     def _render_error(self, payload: dict, error: str) -> None:
         parts = [
             '<div class="meta-label">错误</div>',
-            f'<div class="body-line" style="color:#b54747;">{html.escape(error)}</div>',
+            f'<div class="body-line" style="color:{DANGER};">{html.escape(error)}</div>',
         ]
         partial_translation = str(payload.get("partial_translation") or "").strip()
         partial_explanation = str(payload.get("partial_explanation") or "").strip()
@@ -518,12 +515,12 @@ class ResultWindow(QWidget):
             parts.append(render_lines(explanation))
         if error:
             parts.append(
-                f'<div class="body-line" style="color:#b54747;">{html.escape(error)}</div>'
+                f'<div class="body-line" style="color:{DANGER};">{html.escape(error)}</div>'
             )
         elif not translation and not explanation:
             if pending:
                 parts.append(
-                    '<div class="body-line" style="color:#8995a5;">思考中…</div>'
+                    f'<div class="body-line" style="color:{MUTED};">思考中…</div>'
                 )
             else:
                 parts.append(compose_html("没有可显示的结果。", ""))
@@ -623,14 +620,7 @@ class ResultWindow(QWidget):
     def _set_tip(self, text: str) -> None:
         tip = compact_line_breaks(text)
         self.tip_content.setText(tip)
-        self.tip_content.hide()
-        self.tip_toggle.setText("▸ 补充说明")
-        self.tip_toggle.setVisible(bool(tip))
-
-    def _toggle_tip(self) -> None:
-        expanded = not self.tip_content.isVisible()
-        self.tip_content.setVisible(expanded)
-        self.tip_toggle.setText("▾ 补充说明" if expanded else "▸ 补充说明")
+        self.tip_content.setVisible(bool(tip))
         self._fit_to_content()
 
     def _move_near_cursor(self) -> None:

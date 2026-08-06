@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -49,16 +50,29 @@ from app.ui.result_window import ResultWindow
 from app.ui.theme import (
     APP_STYLE,
     BG,
-    BLUE,
-    BLUE_SOFT,
     BORDER,
     BORDER_LIGHT,
-    GREEN,
+    CARD,
+    DANGER,
+    DISABLED,
+    FONT_BODY,
+    FONT_HEADING,
+    FONT_MICRO,
     MUTED,
-    RED,
+    PRIMARY,
+    PRIMARY_SOFT,
+    RADIUS_LG,
+    RADIUS_MD,
+    RADIUS_PILL,
+    SUCCESS,
     TEXT,
+    TEXT_SECONDARY,
     apply_primary_button_style,
+    button_qss,
+    card_qss,
+    chip_qss,
     ensure_label_backgrounds_transparent,
+    nav_qss,
 )
 from app.ui.workbench import WorkbenchPage
 from app.ui.workers import CaptureStreamWorker, FollowupWorker
@@ -270,10 +284,10 @@ class MainWindow(QMainWindow):
         self.terms_page_label.setText(f"第 {self._terms_page + 1}/{self._terms_pages} 页")
         self.terms_prev_button.setEnabled(self._terms_page > 0)
         self.terms_next_button.setEnabled(self._terms_page < self._terms_pages - 1)
-        if hasattr(self, "sidebar_stats_label"):
+        if hasattr(self, "sidebar_stats_value"):
             fav_count = self.history_store.count_favorite_terms()
-            self.sidebar_stats_label.setText(
-                f"学习统计\n\n截图    {len(self._history_records)}\n术语    {self._terms_total}\n收藏    {fav_count}"
+            self.sidebar_stats_value.setText(
+                f"截图 {len(self._history_records)} · 术语 {self._terms_total} · 收藏 {fav_count}"
             )
 
     def _terms_goto_page(self, page: int) -> None:
@@ -349,18 +363,11 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(170)
-        sidebar.setStyleSheet(
-            f"""
-            QFrame#sidebar {{
-                background: #ffffff;
-                border-right: 1px solid {BORDER};
-            }}
-            """
-        )
+        sidebar.setFixedWidth(144)
+        sidebar.setStyleSheet(f"QFrame#sidebar {{ background: {CARD}; }}")
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(10, 12, 10, 12)
-        sidebar_layout.setSpacing(10)
+        sidebar_layout.setContentsMargins(8, 12, 8, 12)
+        sidebar_layout.setSpacing(8)
 
         self.nav_buttons: list[QPushButton] = []
         self.pages = QStackedWidget()
@@ -378,7 +385,7 @@ class MainWindow(QMainWindow):
 
         font_row = QHBoxLayout()
         font_row.setContentsMargins(4, 0, 4, 0)
-        font_row.setSpacing(6)
+        font_row.setSpacing(8)
         smaller_font = _mini_button("A-")
         larger_font = _mini_button("A+")
         smaller_font.clicked.connect(lambda: self.adjust_text_size(-1))
@@ -388,25 +395,30 @@ class MainWindow(QMainWindow):
         sidebar_layout.addLayout(font_row)
         sidebar_layout.addStretch()
 
-        self.sidebar_stats_label = QLabel("学习统计\n\n截图    0\n术语    0\n收藏    0")
-        self.sidebar_stats_label.setObjectName("sidebarCard")
-        self.sidebar_stats_label.setStyleSheet(
+        stats_card = QFrame()
+        stats_card.setObjectName("sidebarCard")
+        stats_card.setStyleSheet(
             f"""
-            QLabel#sidebarCard {{
-                background: #ffffff;
+            QFrame#sidebarCard {{
+                background: {CARD};
                 border: 1px solid {BORDER};
-                border-radius: 10px;
+                border-radius: {RADIUS_MD};
                 padding: 10px;
-                color: #344054;
-                line-height: 1.45;
             }}
             """
         )
-        sidebar_layout.addWidget(self.sidebar_stats_label)
-
-        local_label = QLabel("本地模式")
-        local_label.setStyleSheet(f"color: {MUTED}; padding: 8px;")
-        sidebar_layout.addWidget(local_label)
+        stats_grid = QGridLayout(stats_card)
+        stats_grid.setContentsMargins(8, 6, 8, 6)
+        stats_grid.setHorizontalSpacing(8)
+        stats_grid.setVerticalSpacing(4)
+        stats_title = QLabel("学习统计")
+        stats_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: {FONT_BODY};")
+        stats_grid.addWidget(stats_title, 0, 0, 1, 2)
+        self.sidebar_stats_value = QLabel("")
+        self.sidebar_stats_value.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        self.sidebar_stats_value.setWordWrap(True)
+        stats_grid.addWidget(self.sidebar_stats_value, 1, 0, 1, 2)
+        sidebar_layout.addWidget(stats_card)
 
         main_area = QWidget()
         main_layout = QVBoxLayout(main_area)
@@ -414,15 +426,16 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
         main_layout.addWidget(self.pages, 1)
         self.status_label = QLabel("就绪")
+        self.status_label.setFixedHeight(24)
         self.status_label.setStyleSheet(
-            f"border-top:1px solid {BORDER}; color:{MUTED}; padding:8px 22px;"
+            f"background: {BG}; color:{MUTED}; padding:0 16px; font-size: {FONT_MICRO};"
         )
         main_layout.addWidget(self.status_label)
 
         shell_layout.addWidget(sidebar)
         shell_layout.addWidget(main_area, 1)
         self.setCentralWidget(shell)
-        self._switch_page(1)
+        self._switch_page(0)
 
     def _apply_text_size(self) -> None:
         app = QApplication.instance()
@@ -481,8 +494,8 @@ class MainWindow(QMainWindow):
     def _build_terms_page(self) -> QWidget:
         page = _page()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(34, 28, 34, 28)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setSpacing(8)
 
         header = QHBoxLayout()
         header.addStretch()
@@ -497,7 +510,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(header)
 
         filter_row = QHBoxLayout()
-        filter_row.setSpacing(6)
+        filter_row.setSpacing(8)
         filter_label = QLabel("领域")
         filter_label.setStyleSheet(f"color:{MUTED};")
         filter_row.addWidget(filter_label)
@@ -515,9 +528,9 @@ class MainWindow(QMainWindow):
         table_card.setStyleSheet(
             f"""
             QFrame#termsTableCard {{
-                background: #ffffff;
+                background: {CARD};
                 border: 1px solid {BORDER};
-                border-radius: 12px;
+                border-radius: {RADIUS_LG};
             }}
             """
         )
@@ -542,7 +555,7 @@ class MainWindow(QMainWindow):
                 border-bottom: 1px solid {BORDER_LIGHT};
             }}
             QTableWidget#termsTable::item:selected {{
-                background: {BLUE_SOFT};
+                background: {PRIMARY_SOFT};
                 color: {TEXT};
             }}
             QTableWidget#termsTable QHeaderView::section {{
@@ -550,7 +563,7 @@ class MainWindow(QMainWindow):
                 border: none;
                 border-bottom: 1px solid {BORDER_LIGHT};
                 padding: 7px;
-                color: #667085;
+                color: {MUTED};
             }}
             """
         )
@@ -569,11 +582,11 @@ class MainWindow(QMainWindow):
         table_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         table_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         table_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
-        table_header.resizeSection(0, 140)
-        table_header.resizeSection(1, 70)
-        table_header.resizeSection(2, 160)
-        table_header.resizeSection(4, 50)
-        table_header.resizeSection(5, 58)
+        table_header.resizeSection(0, 120)
+        table_header.resizeSection(1, 88)
+        table_header.resizeSection(2, 120)
+        table_header.resizeSection(4, 48)
+        table_header.resizeSection(5, 48)
         table_layout.addWidget(self.terms_table, 1)
         table_bottom = QHBoxLayout()
         self.terms_count_label = QLabel("共 0 条术语")
@@ -591,19 +604,19 @@ class MainWindow(QMainWindow):
         table_bottom.addWidget(self.terms_next_button)
         table_layout.addLayout(table_bottom)
 
-        detail_card = _card()
-        detail_layout = QVBoxLayout(detail_card)
-        detail_layout.setContentsMargins(20, 18, 20, 18)
-        detail_layout.setSpacing(12)
+        detail_panel = QWidget()
+        detail_panel.setStyleSheet(
+            f"QWidget {{ background: transparent; border-left: 1px solid {BORDER_LIGHT}; }}"
+        )
+        detail_layout = QVBoxLayout(detail_panel)
+        detail_layout.setContentsMargins(20, 16, 0, 16)
+        detail_layout.setSpacing(8)
         self.term_name_label = QLabel("选择术语")
-        self.term_name_label.setStyleSheet("font-size:20px; ")
+        self.term_name_label.setStyleSheet(f"font-size:{FONT_HEADING}; ")
+        self.term_name_label.setWordWrap(True)
         self.term_domain_label = QLabel("领域：-")
-        self.term_domain_label.setStyleSheet(f"color:{MUTED};")
+        self.term_domain_label.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
         self.term_chinese_label = QLabel("中文名：-")
-        self.term_explanation_label = _readonly_box("完整解释")
-        self.term_explanation_label.setMinimumHeight(160)
-        self.term_example_label = _readonly_box("当前例子")
-        self.term_example_label.setMinimumHeight(90)
         self.term_count_label = QLabel("出现次数：-")
         for label in (
             self.term_chinese_label,
@@ -616,13 +629,17 @@ class MainWindow(QMainWindow):
         detail_layout.addWidget(self.term_domain_label)
         detail_layout.addWidget(_field_title("中文名"))
         detail_layout.addWidget(self.term_chinese_label)
+
         detail_layout.addWidget(_field_title("完整解释"))
-        detail_layout.addWidget(self.term_explanation_label)
+        self.term_explanation_label = _readonly_box("完整解释")
+        detail_layout.addWidget(self.term_explanation_label, 1)
+
         detail_layout.addWidget(_field_title("当前例子"))
-        detail_layout.addWidget(self.term_example_label)
+        self.term_example_label = _readonly_box("当前例子")
+        detail_layout.addWidget(self.term_example_label, 1)
+
         detail_layout.addWidget(_field_title("出现次数"))
         detail_layout.addWidget(self.term_count_label)
-        detail_layout.addStretch()
         term_buttons = QHBoxLayout()
         self.favorite_button = _ghost_button("收藏")
         self.favorite_button.clicked.connect(self._toggle_favorite)
@@ -633,10 +650,13 @@ class MainWindow(QMainWindow):
         delete_button = _danger_button("删除")
         delete_button.clicked.connect(self._delete_selected_term)
         term_buttons.addWidget(delete_button)
+        term_buttons.addStretch(1)
         detail_layout.addLayout(term_buttons)
 
-        content.addWidget(table_card, 8)
-        content.addWidget(detail_card, 3)
+        content.addWidget(table_card, 7)
+        table_card.setMinimumWidth(360)
+        content.addWidget(detail_panel, 4)
+        detail_panel.setMinimumWidth(220)
         layout.addLayout(content, 1)
         return page
 
@@ -762,10 +782,10 @@ class MainWindow(QMainWindow):
         outer.setSpacing(0)
 
         settings_nav = QFrame()
-        settings_nav.setFixedWidth(230)
-        settings_nav.setStyleSheet(f"background:#ffffff; border-right:1px solid {BORDER};")
+        settings_nav.setFixedWidth(232)
+        settings_nav.setStyleSheet(f"background: {BG};")
         nav_layout = QVBoxLayout(settings_nav)
-        nav_layout.setContentsMargins(18, 28, 18, 18)
+        nav_layout.setContentsMargins(16, 28, 16, 16)
         nav_layout.setSpacing(4)
 
         self.settings_pages = QStackedWidget()
@@ -797,11 +817,19 @@ class MainWindow(QMainWindow):
         for i, btn in enumerate(self.settings_nav_buttons):
             btn.setChecked(i == index)
 
+    def _settings_scroll(self, content: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        scroll.setWidget(content)
+        return scroll
+
     def _build_settings_ai_page(self) -> None:
         self._settings_ai_content = QWidget()
         layout = QVBoxLayout(self._settings_ai_content)
-        layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 16)
+        layout.setSpacing(8)
 
         self.api_key_input = QLineEdit(self.settings.api_key)
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -819,12 +847,9 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(ai_card)
 
-        hint_card = _card()
-        hint_layout = QVBoxLayout(hint_card)
-        hint_layout.setContentsMargins(18, 16, 18, 16)
         hint_title = QLabel("常用配置参考")
-        hint_title.setStyleSheet("")
-        hint_layout.addWidget(hint_title)
+        hint_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
+        layout.addWidget(hint_title)
         hints = [
             "DeepSeek: Base URL=https://api.deepseek.com/v1, model=deepseek-v4-flash",
             "DeepSeek: model=deepseek-v4-pro（更强推理）",
@@ -837,15 +862,12 @@ class MainWindow(QMainWindow):
             lbl = QLabel(f"• {hint}")
             lbl.setStyleSheet(f"color:{MUTED};")
             lbl.setWordWrap(True)
-            hint_layout.addWidget(lbl)
-        layout.addWidget(hint_card)
+            layout.addWidget(lbl)
 
-        local_card = _card()
-        local_layout = QVBoxLayout(local_card)
-        local_layout.setContentsMargins(18, 16, 18, 16)
+        layout.addSpacing(8)
         local_title = QLabel("接入本地模型（Ollama 示例）")
-        local_title.setStyleSheet("")
-        local_layout.addWidget(local_title)
+        local_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
+        layout.addWidget(local_title)
         local_steps = [
             "1. 安装 Ollama：https://ollama.com/download",
             "2. 拉取模型（终端执行）：ollama pull qwen3",
@@ -858,8 +880,7 @@ class MainWindow(QMainWindow):
             lbl = QLabel(step)
             lbl.setStyleSheet(f"color:{MUTED};")
             lbl.setWordWrap(True)
-            local_layout.addWidget(lbl)
-        layout.addWidget(local_card)
+            layout.addWidget(lbl)
         layout.addStretch()
 
         self._settings_ai_footer = QHBoxLayout()
@@ -872,13 +893,13 @@ class MainWindow(QMainWindow):
         self._settings_ai_footer.addWidget(save_btn)
         layout.addLayout(self._settings_ai_footer)
 
-        self.settings_pages.addWidget(self._settings_ai_content)
+        self.settings_pages.addWidget(self._settings_scroll(self._settings_ai_content))
 
     def _build_settings_ocr_page(self) -> None:
         self._settings_ocr_content = QWidget()
         layout = QVBoxLayout(self._settings_ocr_content)
-        layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 16)
+        layout.setSpacing(8)
 
         self.ocr_status_label = QLabel("")
         self.ocr_status_label.setWordWrap(True)
@@ -893,12 +914,9 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(ocr_card)
 
-        lang_card = _card()
-        lang_layout = QVBoxLayout(lang_card)
-        lang_layout.setContentsMargins(18, 16, 18, 16)
         lang_title = QLabel("语言说明")
-        lang_title.setStyleSheet("")
-        lang_layout.addWidget(lang_title)
+        lang_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
+        layout.addWidget(lang_title)
         lang_info = [
             "RapidOCR 使用内置中英文识别模型",
             "无需安装 Tesseract 或额外语言包",
@@ -907,8 +925,7 @@ class MainWindow(QMainWindow):
         for info in lang_info:
             lbl = QLabel(f"• {info}")
             lbl.setStyleSheet(f"color:{MUTED};")
-            lang_layout.addWidget(lbl)
-        layout.addWidget(lang_card)
+            layout.addWidget(lbl)
         layout.addStretch()
 
         footer = QHBoxLayout()
@@ -918,13 +935,13 @@ class MainWindow(QMainWindow):
         footer.addWidget(detect_btn)
         layout.addLayout(footer)
 
-        self.settings_pages.addWidget(self._settings_ocr_content)
+        self.settings_pages.addWidget(self._settings_scroll(self._settings_ocr_content))
 
     def _build_settings_hotkey_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 16)
+        layout.setSpacing(8)
 
         self.hotkey_input = QLineEdit(self.settings.hotkey)
         hotkey_card = _settings_card(
@@ -936,12 +953,9 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(hotkey_card)
 
-        app_hotkey_card = _card()
-        hk_layout = QVBoxLayout(app_hotkey_card)
-        hk_layout.setContentsMargins(18, 16, 18, 16)
         hk_title = QLabel("应用内快捷键")
-        hk_title.setStyleSheet("")
-        hk_layout.addWidget(hk_title)
+        hk_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
+        layout.addWidget(hk_title)
         hotkeys = [
             ("Ctrl + Enter", "发送追问"),
             ("Ctrl + H", "打开历史记录页面"),
@@ -951,13 +965,12 @@ class MainWindow(QMainWindow):
         for key, desc in hotkeys:
             row = QHBoxLayout()
             key_lbl = QLabel(key)
-            key_lbl.setStyleSheet(f" color:{BLUE}; min-width:120px;")
+            key_lbl.setStyleSheet(f" color:{PRIMARY}; min-width:120px;")
             desc_lbl = QLabel(desc)
             desc_lbl.setStyleSheet(f"color:{MUTED};")
             row.addWidget(key_lbl)
             row.addWidget(desc_lbl, 1)
-            hk_layout.addLayout(row)
-        layout.addWidget(app_hotkey_card)
+            layout.addLayout(row)
         layout.addStretch()
 
         footer = QHBoxLayout()
@@ -967,13 +980,13 @@ class MainWindow(QMainWindow):
         footer.addWidget(save_btn)
         layout.addLayout(footer)
 
-        self.settings_pages.addWidget(content)
+        self.settings_pages.addWidget(self._settings_scroll(content))
 
     def _build_settings_save_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 16)
+        layout.setSpacing(8)
 
         self.save_screenshots_checkbox = QCheckBox("")
         self.save_screenshots_checkbox.setChecked(self.settings.save_screenshots)
@@ -987,12 +1000,9 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(save_card)
 
-        export_card = _card()
-        export_layout = QVBoxLayout(export_card)
-        export_layout.setContentsMargins(18, 16, 18, 16)
         export_title = QLabel("支持的导出格式")
-        export_title.setStyleSheet("")
-        export_layout.addWidget(export_title)
+        export_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
+        layout.addWidget(export_title)
         exports = [
             ("Markdown (.md)", "历史记录完整导出，含原文/翻译/解释"),
             ("Anki CSV (.csv)", "术语本导出，可直接导入 Anki 记忆卡"),
@@ -1005,8 +1015,7 @@ class MainWindow(QMainWindow):
             desc_lbl.setStyleSheet(f"color:{MUTED};")
             row.addWidget(fmt_lbl)
             row.addWidget(desc_lbl, 1)
-            export_layout.addLayout(row)
-        layout.addWidget(export_card)
+            layout.addLayout(row)
         layout.addStretch()
 
         footer = QHBoxLayout()
@@ -1016,17 +1025,17 @@ class MainWindow(QMainWindow):
         footer.addWidget(save_btn)
         layout.addLayout(footer)
 
-        self.settings_pages.addWidget(content)
+        self.settings_pages.addWidget(self._settings_scroll(content))
 
     def _build_settings_context_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 16)
+        layout.setSpacing(8)
 
         card = _card()
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 18, 22, 18)
+        card_layout.setContentsMargins(24, 16, 24, 16)
         card_layout.setSpacing(12)
 
         self.context_list = QListWidget()
@@ -1059,7 +1068,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(card, 1)
         layout.addStretch(1)
 
-        self.settings_pages.addWidget(content)
+        self.settings_pages.addWidget(self._settings_scroll(content))
         self._refresh_context_list()
 
     def _refresh_context_list(self) -> None:
@@ -1168,7 +1177,7 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("整理重复上下文")
         dialog.setMinimumSize(580, 440)
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setContentsMargins(24, 16, 24, 16)
         layout.setSpacing(12)
         hint = QLabel(
             "同一领域出现多条上下文，勾选要删除的记录（默认勾选较简单的副本，"
@@ -1180,7 +1189,7 @@ class MainWindow(QMainWindow):
 
         context_list = QListWidget()
         context_list.setStyleSheet(
-            "QListWidget::item { padding: 7px 6px; border-bottom: 1px solid #eef1f4; }"
+            f"QListWidget::item {{ padding: 7px 6px; border-bottom: 1px solid {BORDER_LIGHT}; }}"
         )
         for context in candidates:
             summary = "".join((context.summary or "").splitlines())
@@ -1234,6 +1243,7 @@ class MainWindow(QMainWindow):
         self.settings = self.settings_service.load()
         self._refresh_context_list()
         self.workbench_page.refresh_directions()
+        self.overview_page.refresh_direction_label()
         self.status_label.setText(f"当前学习上下文：{self._current_context_name()}")
 
     def _current_context_name(self) -> str:
@@ -1246,12 +1256,12 @@ class MainWindow(QMainWindow):
     def _build_settings_data_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 16)
+        layout.setSpacing(8)
 
         data_card = _card()
         data_layout = QVBoxLayout(data_card)
-        data_layout.setContentsMargins(22, 18, 22, 18)
+        data_layout.setContentsMargins(24, 16, 24, 16)
         data_layout.setSpacing(12)
         actions = [
             ("备份数据库", "把当前数据库复制为备份文件。", self._backup_database),
@@ -1276,27 +1286,27 @@ class MainWindow(QMainWindow):
         layout.addWidget(data_card)
         layout.addStretch()
 
-        self.settings_pages.addWidget(content)
+        self.settings_pages.addWidget(self._settings_scroll(content))
 
     def _build_settings_about_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(10)
+        layout.setContentsMargins(32, 28, 32, 16)
+        layout.setSpacing(8)
 
         about_card = _card()
         about_layout = QVBoxLayout(about_card)
         about_layout.setContentsMargins(24, 24, 24, 24)
-        about_layout.setSpacing(10)
+        about_layout.setSpacing(8)
 
         logo = QLabel("✧")
         logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setStyleSheet(f"font-size:36px; color:{BLUE};")
+        logo.setStyleSheet(f"font-size:{FONT_HEADING}; color:{PRIMARY};")
         about_layout.addWidget(logo)
 
         name_lbl = QLabel("AI Learning Copilot")
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_lbl.setStyleSheet("font-size:20px; ")
+        name_lbl.setStyleSheet(f"font-size:{FONT_HEADING}; ")
         about_layout.addWidget(name_lbl)
 
         ver_lbl = QLabel("版本 0.1.0")
@@ -1315,7 +1325,7 @@ class MainWindow(QMainWindow):
 
         tech_card = _card()
         tech_layout = QVBoxLayout(tech_card)
-        tech_layout.setContentsMargins(18, 16, 18, 16)
+        tech_layout.setContentsMargins(16, 16, 16, 16)
         tech_title = QLabel("技术栈")
         tech_title.setStyleSheet("")
         tech_layout.addWidget(tech_title)
@@ -1335,7 +1345,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(about_card)
         layout.addStretch()
 
-        self.settings_pages.addWidget(content)
+        self.settings_pages.addWidget(self._settings_scroll(content))
 
     def _test_ai_connection(self) -> None:
         from app.services.ai_client import AIClient, AIClientError
@@ -1358,9 +1368,9 @@ class MainWindow(QMainWindow):
             return
         status = self.ocr_service.check_status()
         if status.ok:
-            self.ocr_status_label.setStyleSheet(f"color: {GREEN}; ")
+            self.ocr_status_label.setStyleSheet(f"color: {SUCCESS}; ")
         else:
-            self.ocr_status_label.setStyleSheet(f"color: {RED}; ")
+            self.ocr_status_label.setStyleSheet(f"color: {DANGER}; ")
         details = [
             status.message,
             f"来源：{status.source or '无'}",
@@ -1674,11 +1684,12 @@ class MainWindow(QMainWindow):
         self.result_window.set_result(payload)
 
     def _refresh_sidebar_stats(self) -> None:
-        if not hasattr(self, "sidebar_stats_label"):
+        if not hasattr(self, "sidebar_stats_value"):
             return
         stats = self.history_store.get_statistics()
-        self.sidebar_stats_label.setText(
-            f"学习统计\n\n今日截图    {stats['today_captures']}\n本周截图    {stats['week_captures']}\n本月截图    {stats['month_captures']}\n术语总数    {stats['total_terms']}\n收藏术语    {stats['favorite_terms']}"
+        self.sidebar_stats_value.setText(
+            f"今日 {stats['today_captures']} · 本周 {stats['week_captures']} · "
+            f"本月 {stats['month_captures']}\n术语 {stats['total_terms']} · 收藏 {stats['favorite_terms']}"
         )
 
     def export_markdown(self) -> None:
@@ -1745,27 +1756,19 @@ def _page() -> QWidget:
 def _card() -> QFrame:
     frame = QFrame()
     frame.setObjectName("card")
-    frame.setStyleSheet(
-        f"""
-        QFrame#card {{
-            background: #ffffff;
-            border: 1px solid {BORDER};
-            border-radius: 12px;
-        }}
-        """
-    )
+    frame.setStyleSheet(card_qss())
     return frame
 
 
 def _card_title(text: str) -> QLabel:
     label = QLabel(text)
-    label.setStyleSheet("font-size:14px; ")
+    label.setStyleSheet(f"font-size:{FONT_BODY}; ")
     return label
 
 
 def _field_title(text: str) -> QLabel:
     label = QLabel(text)
-    label.setStyleSheet(" color:#344054;")
+    label.setStyleSheet(f" color:{TEXT_SECONDARY};")
     return label
 
 
@@ -1774,7 +1777,7 @@ def _readonly_box(placeholder: str) -> QTextEdit:
     box.setReadOnly(True)
     box.setAcceptRichText(False)
     box.setPlaceholderText(placeholder)
-    box.setMinimumHeight(78)
+    box.setMinimumHeight(64)
     return box
 
 
@@ -1782,29 +1785,7 @@ def _nav_button(text: str) -> QPushButton:
     button = QPushButton(text)
     button.setCheckable(True)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setStyleSheet(
-        f"""
-        QPushButton {{
-            text-align: left;
-            padding: 8px 10px;
-            border: 0;
-            border-radius: 8px;
-            background: transparent;
-            color: #344054;
-            font-size: 12px;
-            
-        }}
-        QPushButton:hover {{
-            background: {BLUE_SOFT};
-            color: {BLUE};
-        }}
-        QPushButton:checked {{
-            background: {BLUE_SOFT};
-            color: {BLUE};
-            
-        }}
-        """
-    )
+    button.setStyleSheet(nav_qss())
     return button
 
 
@@ -1825,26 +1806,7 @@ def _chip_filter(text: str) -> QPushButton:
     button = QPushButton(text)
     button.setCheckable(True)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setStyleSheet(
-        f"""
-        QPushButton {{
-            border: 1px solid {BORDER};
-            border-radius: 16px;
-            padding: 4px 14px;
-            background: #ffffff;
-            color: #344054;
-        }}
-        QPushButton:hover {{
-            border-color: {BLUE};
-            color: {BLUE};
-        }}
-        QPushButton:checked {{
-            background: {BLUE};
-            color: #ffffff;
-            border-color: {BLUE};
-        }}
-        """
-    )
+    button.setStyleSheet(chip_qss())
     return button
 
 
@@ -1858,20 +1820,19 @@ def _danger_button(text: str) -> QPushButton:
 def _mini_button(text: str) -> QPushButton:
     button = QPushButton(text)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setFixedHeight(30)
+    button.setFixedHeight(32)
     button.setStyleSheet(
         f"""
         QPushButton {{
-            background: #ffffff;
+            background: {CARD};
             border: 1px solid {BORDER};
-            border-radius: 8px;
+            border-radius: {RADIUS_MD};
             padding: 2px 8px;
-            color: #344054;
-            
+            color: {TEXT_SECONDARY};
         }}
         QPushButton:hover {{
-            border-color: {BLUE};
-            color: {BLUE};
+            border-color: {PRIMARY};
+            color: {PRIMARY};
         }}
         """
     )
@@ -1882,13 +1843,13 @@ def _mini_button(text: str) -> QPushButton:
 def _settings_card(title: str, rows: list[tuple[str, QWidget]], note: str = "") -> QFrame:
     card = _card()
     layout = QVBoxLayout(card)
-    layout.setContentsMargins(18, 16, 18, 16)
+    layout.setContentsMargins(16, 16, 16, 16)
     layout.setSpacing(12)
     layout.addWidget(_card_title(title))
     for label_text, field in rows:
         row = QHBoxLayout()
         label = QLabel(label_text)
-        label.setFixedWidth(130)
+        label.setFixedWidth(128)
         label.setStyleSheet("")
         row.addWidget(label)
         row.addWidget(field, 1)
@@ -1896,6 +1857,7 @@ def _settings_card(title: str, rows: list[tuple[str, QWidget]], note: str = "") 
     if note:
         note_label = QLabel(note)
         note_label.setStyleSheet(f"color:{MUTED};")
+        note_label.setWordWrap(True)
         layout.addWidget(note_label)
     return card
 

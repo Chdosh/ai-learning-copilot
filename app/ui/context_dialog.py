@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from app.services.context_detector import DOMAIN_KEYWORDS, SCENE_KEYWORDS, suggest_context
 from app.services.history_store import HistoryStore
 from app.services.settings import AppSettings, SettingsService
-from app.ui.theme import MUTED, apply_primary_button_style
+from app.ui.theme import FONT_BODY, FONT_HEADING, MUTED, TEXT_SECONDARY, apply_primary_button_style
 from app.ui.workers import SummaryWorker
 
 
@@ -66,15 +66,15 @@ class ContextEditDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 22, 24, 18)
+        layout.setContentsMargins(24, 24, 24, 16)
         layout.setSpacing(12)
 
         title = QLabel("学习上下文 = 领域 + 场景 + 背景要点")
-        title.setStyleSheet("font-size:20px;")
+        title.setStyleSheet(f"font-size:{FONT_HEADING};")
         layout.addWidget(title)
 
         source_title = QLabel("1. 粘贴外部摘要（可选，用于自动检测建议）")
-        source_title.setStyleSheet("font-size:13px; color:#344054;")
+        source_title.setStyleSheet(f"font-size:{FONT_BODY}; color:{TEXT_SECONDARY};")
         layout.addWidget(source_title)
         self.source_text = QPlainTextEdit()
         self.source_text.setPlaceholderText("粘贴论文摘要、文档说明等，会自动检测建议领域/场景/背景要点…")
@@ -114,7 +114,7 @@ class ContextEditDialog(QDialog):
         form.addLayout(_labeled("名称", self.name_input))
 
         summary_title = QLabel("背景要点（注入提示词的内容，AI 解释会优先结合它）")
-        summary_title.setStyleSheet("font-size:13px; color:#344054;")
+        summary_title.setStyleSheet(f"font-size:{FONT_BODY}; color:{TEXT_SECONDARY};")
         form.addWidget(summary_title)
         self.summary_input = QTextEdit()
         self.summary_input.setPlaceholderText("关键词或压缩后的背景要点，留空则按通用行为解释。")
@@ -237,10 +237,10 @@ class ContextEditDialog(QDialog):
 
 def _labeled(label: str, widget) -> QHBoxLayout:
     layout = QHBoxLayout()
-    layout.setSpacing(10)
+    layout.setSpacing(8)
     text = QLabel(label)
     text.setFixedWidth(96)
-    text.setStyleSheet("color:#344054;")
+    text.setStyleSheet(f"color:{TEXT_SECONDARY};")
     layout.addWidget(text)
     layout.addWidget(widget, 1)
     return layout
