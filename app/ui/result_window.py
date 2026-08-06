@@ -1,767 +1,669 @@
+"""Compact floating window for streaming capture results."""
 from __future__ import annotations
 
 import html
-from urllib.parse import unquote
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QResizeEvent, QTextCursor
+from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QCursor,
+    QKeyEvent,
+    QMouseEvent,
+    QTextOption,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
-    QSizePolicy,
-    QStackedWidget,
     QTextBrowser,
-    QTextEdit,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
 
-from app.ui.theme import BLUE, BLUE_SOFT, BORDER, GREEN, MUTED, RED
-
-
-COMPACT_WIDTH_KEY = "result_window_compact_width"
-COMPACT_HEIGHT_KEY = "result_window_compact_height"
-DEFAULT_COMPACT_SIZE = QSize(520, 330)
+from app.services.ai_client import compact_line_breaks
+from app.ui.message_render import (
+    DOC_STYLESHEET,
+    build_result_html,
+    compose_html,
+    render_lines,
+    split_lead,
+)
+from app.ui.theme import BLUE, BLUE_DARK, BLUE_SOFT, BORDER, BORDER_LIGHT, MUTED, TEXT
 
 
 class ResultWindow(QWidget):
     request_followup = Signal(str, str, str)
+    request_retry = Signal(int)
+    open_history = Signal()
 
-    def __init__(self, settings_store=None) -> None:
-        super().__init__()
-        self.setWindowTitle("AI 截图翻译")
-        self.setWindowFlags(
-            Qt.WindowType.Window
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
-        self.setMinimumSize(420, 260)
-        self.settings_store = settings_store
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
         self.payload: dict = {}
-        self.term_map: dict[str, str] = {}
-        self.tab_buttons: list[QPushButton] = []
-        self.text_size = 13
-        self._compact_size = self._load_compact_size()
-        self._is_compact = True
-        self._allow_close = False
-        self._resize_save_timer = QTimer(self)
-        self._resize_save_timer.setSingleShot(True)
-        self._resize_save_timer.timeout.connect(self._save_compact_size)
-        self._build_ui()
-        self._show_compact()
-
-    def set_loading(self, image_path: str) -> None:
-        self.payload = {"image_path": image_path}
-        self.term_map = {}
-        self.section_title.setText("正在识别")
-        self.preview_browser.setHtml(_simple_html("正在 OCR 识别截图文字，并准备发送给 AI 解释。", self.text_size))
-        self.term_detail_browser.setHtml("")
-        self.translation_view.setPlainText("")
-        self.explanation_view.setHtml("")
-        self._set_context("", "", "")
-        self._render_followup_history()
-        self._show_compact()
-        self.showNormal()
-        self.raise_()
-
-    def set_result(self, payload: dict) -> None:
-        self.payload = payload
-        self.term_map = _build_term_map(payload.get("terms") or [])
-        self.section_title.setText("总解释")
-        translation = payload.get("translation") or "无翻译"
-        explanation = _compose_explanation(payload)
-        self.translation_view.setPlainText(translation)
-        self.explanation_view.setHtml(_html_with_terms(explanation, self.term_map, font_size=self.text_size))
-        self.preview_browser.setHtml(_html_with_terms(explanation, self.term_map, font_size=self.text_size))
-        self.term_detail_browser.setHtml("")
-        self._set_context(payload.get("source_text") or "", translation, explanation)
-        self._render_followup_history()
-        self._show_compact()
-        self.showNormal()
-        self.raise_()
-
-    def append_followup_result(self, payload: dict) -> None:
-        if payload.get("conversation_id"):
-            self.payload["conversation_id"] = payload.get("conversation_id")
-        if payload.get("translation"):
-            self.payload["translation"] = payload.get("translation")
-            self.translation_view.setPlainText(payload.get("translation") or "")
-        if payload.get("explanation"):
-            self.payload["explanation"] = payload.get("explanation")
-        if payload.get("terms"):
-            self.payload["terms"] = payload.get("terms")
-            self.term_map = _build_term_map(payload.get("terms") or [])
-        self._replace_pending_ai_line(payload.get("explanation") or payload.get("translation") or "")
-        explanation = _compose_explanation(self.payload)
-        self.explanation_view.setHtml(_html_with_terms(explanation, self.term_map, font_size=self.text_size))
-        self.preview_browser.setHtml(_html_with_terms(explanation, self.term_map, font_size=self.text_size))
-        self.term_detail_browser.setHtml("")
-        self._set_context(
-            self.payload.get("source_text") or "",
-            self.payload.get("translation") or "",
-            explanation,
+        self._drag_offset: QPoint | None = None
+        self._stream_buffers = {"translation": "", "explanation": "", "learning_tip": ""}
+        self._followup_anchor: int | None = None
+        self._followup_sections = {"translation": "", "explanation": ""}
+        self._stream_terms: list[dict] = []
+        self._source_text = ""
+        self._fit_width_peak = 0
+        self._fit_height_peak = 0
+        self._busy = False
+        self._loading = False
+        self.setObjectName("resultWindow")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.NoDropShadowWindowHint
         )
-        self._show_expanded(2)
+        self.setMinimumWidth(380)
+        self.setMaximumWidth(760)
 
-    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        self._save_compact_size()
-        if self._allow_close:
-            event.accept()
-            return
-        event.ignore()
-        self.showMinimized()
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(6, 6, 6, 6)
+        self.card = QFrame()
+        self.card.setObjectName("resultCard")
+        outer_layout.addWidget(self.card)
+        shadow = QGraphicsDropShadowEffect(self.card)
+        shadow.setBlurRadius(20)
+        shadow.setOffset(0, 3)
+        shadow.setColor(QColor(31, 45, 61, 45))
+        self.card.setGraphicsEffect(shadow)
 
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        if not hasattr(self, "stack") or not hasattr(self, "_resize_save_timer"):
-            return
-        if self._is_compact and self.stack.currentIndex() == 0:
-            self._compact_size = self.size()
-            self._resize_save_timer.start(300)
+        layout = QVBoxLayout(self.card)
+        layout.setContentsMargins(6, 4, 6, 6)
+        layout.setSpacing(2)
 
-    def _build_ui(self) -> None:
-        self._apply_style()
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(self._build_header())
-
-        self.stack = QStackedWidget()
-        self.stack.addWidget(self._build_compact_page())
-        self.stack.addWidget(self._build_expanded_page())
-        root.addWidget(self.stack, 1)
-        root.addWidget(self._build_footer())
-
-    def _build_header(self) -> QFrame:
-        header = QFrame()
-        header.setObjectName("headerBar")
-        layout = QHBoxLayout(header)
-        layout.setContentsMargins(14, 8, 14, 8)
-        layout.setSpacing(8)
-        logo = QLabel("✧")
-        logo.setStyleSheet(f"color:{BLUE}; font-size:22px; font-weight:800;")
-        title = QLabel("AI 截图翻译")
-        title.setObjectName("windowTitle")
-        layout.addWidget(logo)
-        layout.addWidget(title)
-        layout.addStretch()
-        minimize = QPushButton("—")
-        minimize.setObjectName("linkButton")
-        minimize.clicked.connect(self.showMinimized)
-        close = QPushButton("×")
-        close.setObjectName("linkButton")
-        close.setStyleSheet(f"QPushButton#linkButton {{ color:{RED}; font-size:22px; border:0; background:transparent; }}")
-        close.clicked.connect(self.close)
-        layout.addWidget(minimize)
-        layout.addWidget(close)
-        return header
-
-    def _build_compact_page(self) -> QWidget:
-        page = QWidget()
-        layout = QHBoxLayout(page)
-        layout.setContentsMargins(14, 12, 14, 12)
-        layout.setSpacing(10)
-
-        content = QVBoxLayout()
-        content.setSpacing(7)
-        title_row = QHBoxLayout()
-        self.section_title = QLabel("总解释")
-        self.section_title.setObjectName("sectionTitle")
-        title_row.addWidget(self.section_title)
-        title_row.addStretch()
-        content.addLayout(title_row)
-
-        self.preview_browser = QTextBrowser()
-        self.preview_browser.setObjectName("previewBrowser")
-        self.preview_browser.setOpenLinks(False)
-        self.preview_browser.setMouseTracking(True)
-        self.preview_browser.anchorClicked.connect(lambda url: self._show_term_detail(url.toString()))
-        self.preview_browser.viewport().installEventFilter(self)
-        self.preview_browser.setHtml(_simple_html("等待截图识别结果...", self.text_size))
-        content.addWidget(self.preview_browser, 2)
-
-        term_title = QLabel("关键词解释")
-        term_title.setStyleSheet(f"color:{MUTED}; font-weight:700;")
-        content.addWidget(term_title)
-        self.term_detail_browser = QTextBrowser()
-        self.term_detail_browser.setObjectName("termDetail")
-        self.term_detail_browser.setOpenLinks(False)
-        self.term_detail_browser.setHtml("")
-        content.addWidget(self.term_detail_browser, 1)
-        layout.addLayout(content, 1)
-
-        action_col = QVBoxLayout()
-        action_col.setSpacing(6)
-        self.translation_button = _action_button("译", "查看翻译")
-        self.explanation_button = _action_button("解", "查看解释")
-        self.followup_button = _action_button("问", "继续追问")
-        smaller_button = _action_button("A-", "缩小文字")
-        bigger_button = _action_button("A+", "放大文字")
-        expand_button = _action_button("大窗", "展开大窗口")
-        close_button = _action_button("关", "关闭")
-        self.translation_button.clicked.connect(lambda: self._show_expanded(0))
-        self.explanation_button.clicked.connect(lambda: self._show_expanded(1))
-        self.followup_button.clicked.connect(lambda: self._show_expanded(2))
-        smaller_button.clicked.connect(lambda: self.adjust_text_size(-1))
-        bigger_button.clicked.connect(lambda: self.adjust_text_size(1))
-        expand_button.clicked.connect(lambda: self._show_expanded(1))
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        self.status_label = QLabel("就绪")
+        self.status_label.setObjectName("statusLabel")
+        close_button = QPushButton("×")
+        close_button.setObjectName("closeButton")
+        close_button.setFixedSize(24, 20)
         close_button.clicked.connect(self.close)
-        for button in (
-            self.translation_button,
-            self.explanation_button,
-            self.followup_button,
-            smaller_button,
-            bigger_button,
-            expand_button,
-            close_button,
-        ):
-            action_col.addWidget(button)
-        action_col.addStretch()
-        layout.addLayout(action_col)
-        return page
+        header.addWidget(self.status_label)
+        header.addStretch()
+        header.addWidget(close_button)
+        layout.addLayout(header)
 
-    def _build_expanded_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        self.text_browser = QTextBrowser()
+        self.text_browser.setObjectName("resultBody")
+        self.text_browser.setOpenExternalLinks(False)
+        self.text_browser.setFrameShape(QFrame.Shape.NoFrame)
+        self.text_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.text_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        base_font = self.text_browser.font()
+        base_font.setPixelSize(13)
+        self.text_browser.setFont(base_font)
+        self.text_browser.document().setDocumentMargin(2)
+        self.text_browser.setMinimumHeight(40)
+        self.text_browser.setMaximumHeight(720)
+        self.text_browser.document().setDefaultStyleSheet(DOC_STYLESHEET)
+        self.text_browser.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.addWidget(self.text_browser)
 
-        tabs = QFrame()
-        tabs.setStyleSheet(f"background:#ffffff; border-bottom:1px solid {BORDER};")
-        tabs_layout = QHBoxLayout(tabs)
-        tabs_layout.setContentsMargins(46, 0, 46, 0)
-        tabs_layout.setSpacing(26)
-        for label, index in (("翻译", 0), ("解释", 1), ("追问", 2)):
-            button = QPushButton(label)
-            button.setObjectName("tabButton")
-            button.setCheckable(True)
-            button.clicked.connect(lambda checked=False, idx=index: self._set_detail_tab(idx))
-            self.tab_buttons.append(button)
-            tabs_layout.addWidget(button)
-        tabs_layout.addStretch()
-        layout.addWidget(tabs)
+        self.tip_toggle = QPushButton("▸ 补充说明")
+        self.tip_toggle.setObjectName("tipToggle")
+        self.tip_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tip_toggle.clicked.connect(self._toggle_tip)
+        self.tip_toggle.hide()
+        layout.addWidget(self.tip_toggle, 0, Qt.AlignmentFlag.AlignLeft)
 
-        body = QWidget()
-        body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(24, 22, 24, 22)
-        body_layout.setSpacing(16)
+        self.tip_content = QLabel()
+        self.tip_content.setObjectName("tipContent")
+        self.tip_content.setWordWrap(True)
+        self.tip_content.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.tip_content.hide()
+        layout.addWidget(self.tip_content)
 
-        body_layout.addWidget(self._build_context_panel(), 3)
-        body_layout.addWidget(self._build_center_panel(), 7)
-        body_layout.addWidget(self._build_action_panel(), 2)
-        layout.addWidget(body, 1)
-        return page
-
-    def _build_context_panel(self) -> QFrame:
-        panel = _panel()
-        panel.setMinimumWidth(260)
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        title = QLabel("本轮上下文  ⓘ")
-        title.setStyleSheet("font-size:17px; font-weight:800;")
-        subtitle = QLabel("基于当前截图的内容，供追问参考")
-        subtitle.setStyleSheet(f"color:{MUTED};")
-        layout.addWidget(title)
-        layout.addWidget(subtitle)
-        self.source_context = _context_card("OCR 原文", BLUE)
-        self.translation_context = _context_card("中文翻译", GREEN)
-        self.summary_context = _context_card("总解释", BLUE)
-        layout.addWidget(self.source_context)
-        layout.addWidget(self.translation_context)
-        layout.addWidget(self.summary_context, 1)
-        return panel
-
-    def _build_center_panel(self) -> QFrame:
-        panel = _panel()
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-
-        presets = QHBoxLayout()
-        for label, question, mode in (
-            ("更简单点", "请用更简单的话解释这段内容。", "simple"),
-            ("举例说明", "请举几个具体例子说明。", "examples"),
-            ("重新解释", "请重新解释这段内容。", "default"),
-        ):
-            button = QPushButton(label)
-            button.clicked.connect(lambda checked=False, q=question, m=mode: self._preset_followup(q, m))
-            presets.addWidget(button)
-        presets.addStretch()
-        layout.addLayout(presets)
-
-        self.detail_stack = QStackedWidget()
-        self.translation_view = QTextEdit()
-        self.translation_view.setReadOnly(True)
-        self.translation_view.setAcceptRichText(False)
-
-        self.explanation_view = QTextBrowser()
-        self.explanation_view.setOpenLinks(False)
-        self.explanation_view.setMouseTracking(True)
-        self.explanation_view.anchorClicked.connect(lambda url: self._show_term_detail(url.toString()))
-        self.explanation_view.viewport().installEventFilter(self)
-
-        followup_page = QWidget()
-        followup_layout = QVBoxLayout(followup_page)
-        followup_layout.setContentsMargins(0, 0, 0, 0)
-        followup_layout.setSpacing(10)
-        self.followup_history = QTextEdit()
-        self.followup_history.setReadOnly(True)
-        self.followup_history.setAcceptRichText(False)
-        input_row = QHBoxLayout()
+        actions = QHBoxLayout()
+        actions.setSpacing(4)
         self.followup_input = QLineEdit()
-        self.followup_input.setPlaceholderText("继续追问当前截图内容...")
-        self.followup_input.returnPressed.connect(lambda: self._send_followup("custom"))
-        send_button = QPushButton("发送")
-        send_button.setObjectName("primaryButton")
-        send_button.clicked.connect(lambda: self._send_followup("custom"))
-        input_row.addWidget(self.followup_input, 1)
-        input_row.addWidget(send_button)
-        followup_layout.addWidget(self.followup_history, 1)
-        followup_layout.addLayout(input_row)
-
-        self.detail_stack.addWidget(self.translation_view)
-        self.detail_stack.addWidget(self.explanation_view)
-        self.detail_stack.addWidget(followup_page)
-        layout.addWidget(self.detail_stack, 1)
-        return panel
-
-    def _build_action_panel(self) -> QFrame:
-        panel = _panel()
-        panel.setMinimumWidth(170)
-        layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
-        title = QLabel("操作")
-        title.setStyleSheet("font-size:17px; font-weight:800;")
-        layout.addWidget(title)
-        actions = [
-            ("▣  复制回答", self._copy_answer),
-            ("▤  切换到解释", lambda: self._set_detail_tab(1)),
-            ("☆  收藏术语", self._show_readonly_notice),
-            ("⟳  重新生成", lambda: self._preset_followup("请重新解释这段内容。", "default")),
-            ("⇩  导出 Markdown", self._copy_markdown),
-            ("◴  打开历史", self._show_readonly_notice),
-        ]
-        for label, callback in actions:
-            button = QPushButton(label)
-            button.clicked.connect(callback)
-            layout.addWidget(button)
-        layout.addStretch()
-        return panel
-
-    def _build_footer(self) -> QFrame:
-        footer = QFrame()
-        footer.setObjectName("footerBar")
-        layout = QHBoxLayout(footer)
-        layout.setContentsMargins(14, 7, 14, 7)
-        self.footer_label = QLabel("识别语言：eng + chi_sim    来源：Tesseract")
-        self.footer_label.setStyleSheet(f"color:{MUTED}; font-size:12px;")
-        expand_link = QPushButton("展开大窗口 ↗")
-        expand_link.setObjectName("linkButton")
-        expand_link.clicked.connect(lambda: self._show_expanded(1))
-        layout.addWidget(self.footer_label)
-        layout.addStretch()
-        layout.addWidget(expand_link)
-        return footer
-
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802
-        term_views = {
-            view.viewport()
-            for view in (getattr(self, "preview_browser", None), getattr(self, "explanation_view", None))
-            if view is not None
-        }
-        if watched in term_views and event.type() == QEvent.Type.MouseMove:
-            if QApplication.keyboardModifiers() & Qt.KeyboardModifier.ControlModifier:
-                pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-                global_pos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
-                view = self.preview_browser if watched is self.preview_browser.viewport() else self.explanation_view
-                anchor = view.anchorAt(pos)
-                if anchor and anchor in self.term_map:
-                    QToolTip.showText(global_pos, self.term_map[anchor], view)
-                else:
-                    QToolTip.hideText()
-        return super().eventFilter(watched, event)
+        self.followup_input.setObjectName("followupInput")
+        self.followup_input.setPlaceholderText("继续追问...")
+        self.followup_input.returnPressed.connect(self._send_followup)
+        self.send_button = QPushButton("发送")
+        self.send_button.setObjectName("primaryButton")
+        self.send_button.clicked.connect(self._send_followup)
+        self.retry_button = QPushButton("重试")
+        self.retry_button.setObjectName("primaryButton")
+        self.retry_button.clicked.connect(self._send_retry)
+        self.retry_button.hide()
+        more_button = QPushButton("···")
+        more_button.setObjectName("moreButton")
+        more_button.setFixedWidth(28)
+        self.more_button = more_button
+        more_menu = QMenu(more_button)
+        more_menu.setObjectName("resultMenu")
+        font_up = QAction("A+  加大字号", more_menu)
+        font_up.triggered.connect(lambda: self.adjust_text_size(1))
+        font_down = QAction("A-  缩小字号", more_menu)
+        font_down.triggered.connect(lambda: self.adjust_text_size(-1))
+        copy_action = QAction("复制结果", more_menu)
+        copy_action.triggered.connect(self._copy_text)
+        history_action = QAction("打开历史", more_menu)
+        history_action.triggered.connect(self.open_history.emit)
+        more_menu.addAction(font_up)
+        more_menu.addAction(font_down)
+        more_menu.addSeparator()
+        more_menu.addAction(copy_action)
+        more_menu.addAction(history_action)
+        more_button.setMenu(more_menu)
+        actions.addWidget(self.followup_input, 1)
+        actions.addWidget(self.send_button)
+        actions.addWidget(self.retry_button)
+        actions.addWidget(more_button)
+        layout.addLayout(actions)
+        self._apply_style()
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
             f"""
-            QWidget {{
-                background: #ffffff;
-                color: #101828;
+            QWidget#resultWindow {{
+                background: transparent;
+                color: {TEXT};
                 font-family: "Microsoft YaHei", "Segoe UI", Arial;
-                font-size: {self.text_size}px;
+                font-size: 13px;
             }}
-            QFrame#headerBar {{
-                background: #ffffff;
-                border-bottom: 1px solid {BORDER};
-            }}
-            QFrame#footerBar {{
-                background: #fbfdff;
-                border-top: 1px solid {BORDER};
-            }}
-            QLabel#windowTitle {{
-                font-size: {self.text_size + 2}px;
-                font-weight: 800;
-            }}
-            QLabel#sectionTitle {{
-                font-size: {self.text_size + 2}px;
-                font-weight: 800;
-            }}
-            QTextBrowser#previewBrowser {{
-                border: 1px solid {BORDER};
-                border-radius: 8px;
-                background: #ffffff;
-                padding: 6px;
-            }}
-            QTextBrowser#termDetail {{
-                border: 1px solid {BORDER};
-                border-radius: 8px;
-                background: #fbfdff;
-                padding: 6px;
-            }}
-            QTextEdit, QTextBrowser, QLineEdit {{
-                border: 1px solid {BORDER};
-                border-radius: 8px;
-                padding: 7px;
-                background: #ffffff;
-                selection-background-color: {BLUE};
-            }}
-            QPushButton {{
+            QFrame#resultCard {{
                 background: #ffffff;
                 border: 1px solid {BORDER};
-                border-radius: 7px;
-                padding: 6px 10px;
-                color: #344054;
+                border-radius: 12px;
             }}
-            QPushButton:hover {{
-                border-color: #93b4ff;
-                background: #f8fbff;
+            QWidget#resultWindow QLabel {{
+                color: {TEXT};
+                background: transparent;
+                border: 0;
             }}
-            QPushButton#actionButton {{
-                min-width: 46px;
-                max-width: 46px;
-                min-height: 30px;
-                max-height: 30px;
+            QLabel#statusLabel {{
+                color: {MUTED};
+                background: transparent;
+                border: 0;
                 padding: 0;
-                font-size: {self.text_size}px;
-                font-weight: 700;
+                font-size: 10px;
+            }}
+            QTextBrowser#resultBody {{
+                color: #334155;
+                background: transparent;
+                border: 0;
+                padding: 0 1px 0 1px;
+                selection-background-color: {BLUE_SOFT};
+            }}
+            QPushButton#tipToggle {{
+                min-height: 18px;
+                color: {MUTED};
+                background: transparent;
+                border: 0;
+                padding: 0;
+                font-size: 10px;
+                text-align: left;
+            }}
+            QPushButton#tipToggle:hover {{ color: {BLUE}; }}
+            QLabel#tipContent {{
+                color: #475467;
+                background: #f4f6f8;
+                border: 0;
+                border-radius: 8px;
+                padding: 5px 8px;
+                font-size: 12px;
+            }}
+            QLineEdit#followupInput {{
+                color: {TEXT};
+                background: #ffffff;
+                border: 1px solid {BORDER};
+                border-radius: 8px;
+                padding: 4px 8px;
+                selection-background-color: {BLUE_SOFT};
+            }}
+            QLineEdit#followupInput:focus {{ border-color: {BLUE}; }}
+            QWidget#resultWindow QPushButton {{
+                min-height: 24px;
+                border-radius: 8px;
+                padding: 0 9px;
+                font-size: 11px;
             }}
             QPushButton#primaryButton {{
+                color: #ffffff;
                 background: {BLUE};
-                color: #ffffff;
-                border-color: {BLUE};
-                font-weight: 700;
+                border: 1px solid {BLUE};
             }}
-            QPushButton#primaryButton:hover, QPushButton#primaryButton:pressed {{
-                background: #1d4ed8;
-                color: #ffffff;
-                border-color: #1d4ed8;
-            }}
-            QPushButton:disabled {{
-                background: #f2f4f7;
-                color: #98a2b3;
-                border-color: #e4e7ec;
-            }}
-            QPushButton#linkButton {{
-                border: 0;
-                color: {BLUE};
+            QPushButton#primaryButton:hover {{ background: {BLUE_DARK}; }}
+            QPushButton#moreButton {{
+                color: {MUTED};
                 background: transparent;
-                font-weight: 700;
-            }}
-            QPushButton#tabButton {{
                 border: 0;
-                border-radius: 0;
-                padding: 11px 30px;
-                background: transparent;
-                font-size: {self.text_size + 1}px;
-                color: #344054;
+                padding: 0;
+                font-size: 14px;
             }}
-            QPushButton#tabButton:checked {{
-                color: {BLUE};
-                font-weight: 800;
-                border-bottom: 2px solid {BLUE};
+            QPushButton#moreButton:hover {{ color: {TEXT}; background: {BORDER_LIGHT}; }}
+            QPushButton#moreButton::menu-indicator {{
+                image: none;
+                width: 0;
+                height: 0;
+            }}
+            QPushButton#closeButton {{
+                color: #718096;
+                background: transparent;
+                border: 0;
+                padding: 0;
+                min-height: 0;
+                font-size: 16px;
+            }}
+            QPushButton#closeButton:hover {{ color: #b54747; background: #fbeeee; }}
+            QMenu#resultMenu {{
+                color: #334155;
+                background: #ffffff;
+                border: 1px solid {BORDER};
+                border-radius: 8px;
+                padding: 5px;
+            }}
+            QMenu#resultMenu::item {{
+                padding: 6px 18px 6px 10px;
+                border-radius: 6px;
+            }}
+            QMenu#resultMenu::item:selected {{ background: {BLUE_SOFT}; color: {BLUE}; }}
+            QTextBrowser#resultBody QScrollBar:vertical {{
+                background: transparent;
+                width: 7px;
+                margin: 2px 0;
+            }}
+            QTextBrowser#resultBody QScrollBar::handle:vertical {{
+                background: #d0d5dd;
+                min-height: 24px;
+                border-radius: 3px;
+            }}
+            QTextBrowser#resultBody QScrollBar::handle:vertical:hover {{ background: #98a2b3; }}
+            QTextBrowser#resultBody QScrollBar::add-line:vertical,
+            QTextBrowser#resultBody QScrollBar::sub-line:vertical {{
+                height: 0;
+                background: transparent;
+            }}
+            QTextBrowser#resultBody QScrollBar::add-page:vertical,
+            QTextBrowser#resultBody QScrollBar::sub-page:vertical {{
+                background: transparent;
             }}
             """
         )
 
+    def show_loading(self) -> None:
+        self.payload = {}
+        self._stream_buffers = {"translation": "", "explanation": "", "learning_tip": ""}
+        self._stream_terms = []
+        self._source_text = ""
+        self._fit_width_peak = 0
+        self._fit_height_peak = 0
+        self._followup_anchor = None
+        self._followup_sections = {"translation": "", "explanation": ""}
+        self.text_browser.setPlainText("")
+        self._set_tip("")
+        self.followup_input.clear()
+        self._enter_loading()
+        self._set_busy(True)
+        self.status_label.setText("正在识别...")
+        self._fit_to_content()
+        self._move_near_cursor()
+        self.show()
+        self.raise_()
+        QApplication.processEvents()
+
+    def _enter_loading(self) -> None:
+        self._loading = True
+        self.text_browser.setVisible(False)
+        self.tip_toggle.setVisible(False)
+        self.tip_content.setVisible(False)
+        self.followup_input.setVisible(False)
+        self.send_button.setVisible(False)
+        self.retry_button.setVisible(False)
+        self.more_button.setVisible(False)
+
+    def _exit_loading(self) -> None:
+        if not self._loading:
+            return
+        self._loading = False
+        self.text_browser.setVisible(True)
+        self.retry_button.setVisible(False)
+        self._set_tip(self.tip_content.text())
+
+    def _show_actions(self) -> None:
+        self.followup_input.setVisible(True)
+        self.send_button.setVisible(True)
+        self.more_button.setVisible(True)
+
+    def set_status(self, status: str) -> None:
+        normalized = status.strip()
+        if normalized in {"", "完成", "已完成", "就绪"}:
+            self.status_label.setText("解析完成")
+        else:
+            self.status_label.setText(normalized)
+        self.status_label.show()
+        self._fit_to_content()
+        QApplication.processEvents()
+
+    def append_stream_chunk(self, section: str, chunk: str) -> None:
+        """Append a real provider delta, re-rendering both visible sections."""
+        if section not in self._stream_buffers or not chunk:
+            return
+        self._exit_loading()
+        self._stream_buffers[section] += chunk
+        if section == "learning_tip":
+            self._set_tip(self._stream_buffers["learning_tip"])
+            self._fit_to_content()
+            QApplication.processEvents()
+            return
+        self.text_browser.setHtml(
+            build_result_html(
+                translation=self._stream_buffers["translation"],
+                explanation=self._stream_buffers["explanation"],
+                source_text=self._source_text,
+                terms=self._stream_terms,
+            )
+        )
+        self._fit_to_content()
+        QApplication.processEvents()
+
+    def set_stream_terms(self, terms: list[dict]) -> None:
+        if not isinstance(terms, list):
+            return
+        self._exit_loading()
+        self._stream_terms = [term for term in terms if isinstance(term, dict)]
+        self.text_browser.setHtml(
+            build_result_html(
+                translation=self._stream_buffers["translation"],
+                explanation=self._stream_buffers["explanation"],
+                source_text=self._source_text,
+                terms=self._stream_terms,
+            )
+        )
+        self._fit_to_content()
+        QApplication.processEvents()
+
+    def set_source_text(self, source_text: str) -> None:
+        self._source_text = source_text or ""
+
+    def set_result(self, payload: dict) -> None:
+        self.payload = dict(payload)
+        self._source_text = str(payload.get("source_text") or "")
+        self._exit_loading()
+        error = str(payload.get("error") or "").strip()
+        if error:
+            self._render_error(payload, error)
+            self.set_status(error if len(error) <= 60 else error[:57] + "...")
+        else:
+            self.text_browser.setHtml(
+                build_result_html(
+                    translation=str(payload.get("translation") or ""),
+                    explanation=str(payload.get("explanation") or ""),
+                    source_text=str(payload.get("source_text") or ""),
+                    terms=payload.get("terms") if isinstance(payload.get("terms"), list) else [],
+                )
+            )
+            self._set_tip(str(payload.get("learning_tip") or ""))
+            self.set_status("完成")
+        capture_id = self.payload.get("capture_id")
+        self.retry_button.setVisible(
+            bool(error) and isinstance(capture_id, int) and capture_id > 0
+        )
+        self._show_actions()
+        self._set_busy(False)
+        self._fit_to_content()
+        if not self.isVisible():
+            self._move_near_cursor()
+            self.show()
+            self.raise_()
+
+    def _render_error(self, payload: dict, error: str) -> None:
+        parts = [
+            '<div class="meta-label">错误</div>',
+            f'<div class="body-line" style="color:#b54747;">{html.escape(error)}</div>',
+        ]
+        partial_translation = str(payload.get("partial_translation") or "").strip()
+        partial_explanation = str(payload.get("partial_explanation") or "").strip()
+        if partial_translation:
+            parts.append('<div class="meta-label">已获取的翻译</div>')
+            parts.append(            render_lines(partial_translation))
+        if partial_explanation:
+            parts.append('<div class="meta-label">已获取的解释</div>')
+            parts.append(            render_lines(partial_explanation))
+        source_text = str(payload.get("source_text") or "").strip()
+        if source_text:
+            parts.append('<div class="meta-label">OCR 原文</div>')
+            parts.append(            render_lines(source_text))
+        self.text_browser.setHtml("".join(parts))
+        self._set_tip("")
+
+    def begin_followup(self) -> None:
+        self._followup_sections = {"translation": "", "explanation": ""}
+        self.status_label.setText("正在追问...")
+        self.status_label.show()
+        self.retry_button.hide()
+        self._set_busy(True)
+        cursor = self.text_browser.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self._followup_anchor = cursor.position()
+        cursor.insertHtml(self._followup_block_html(pending=True))
+        self.text_browser.setTextCursor(cursor)
+        self._fit_to_content()
+        QApplication.processEvents()
+
+    def append_followup_chunk(self, section: str, chunk: str) -> None:
+        if section not in self._followup_sections or not chunk:
+            return
+        self._followup_sections[section] += chunk
+        if self._followup_anchor is None:
+            return
+        self._update_followup_block(
+            translation=self._followup_sections["translation"],
+            explanation=self._followup_sections["explanation"],
+        )
+        self._fit_to_content()
+        QApplication.processEvents()
+
+    def show_followup_error(self, message: str) -> None:
+        if self._followup_anchor is not None:
+            self._update_followup_block(
+                translation=self._followup_sections["translation"],
+                explanation=self._followup_sections["explanation"],
+                error=message,
+            )
+        else:
+            self.set_status(message)
+        self.set_status(message if len(message) <= 60 else message[:57] + "...")
+        self._set_busy(False)
+        self._fit_to_content()
+        QApplication.processEvents()
+
+    def append_followup_result(self, payload: dict) -> None:
+        self.payload.update(payload)
+        if self._followup_anchor is None:
+            explanation = str(payload.get("explanation") or "").strip()
+            if explanation:
+                cursor = self.text_browser.textCursor()
+                cursor.movePosition(cursor.MoveOperation.End)
+                cursor.insertBlock()
+                cursor.insertHtml(
+                    '<div class="meta-label">追问回答</div>'
+                    + render_lines(explanation)
+                )
+                self.text_browser.setTextCursor(cursor)
+        else:
+            self._update_followup_block(
+                translation=str(payload.get("translation") or ""),
+                explanation=str(payload.get("explanation") or ""),
+            )
+        self.set_status("完成")
+        self._set_busy(False)
+        self._fit_to_content()
+
+    def _followup_block_html(
+        self,
+        translation: str = "",
+        explanation: str = "",
+        *,
+        pending: bool = False,
+        error: str = "",
+    ) -> str:
+        parts = ['<div class="meta-label">追问回答</div>']
+        if translation:
+            parts.append('<div class="meta-label">翻译</div>')
+            parts.append(render_lines(translation))
+        if explanation:
+            parts.append(render_lines(explanation))
+        if error:
+            parts.append(
+                f'<div class="body-line" style="color:#b54747;">{html.escape(error)}</div>'
+            )
+        elif not translation and not explanation:
+            if pending:
+                parts.append(
+                    '<div class="body-line" style="color:#8995a5;">思考中…</div>'
+                )
+            else:
+                parts.append(compose_html("没有可显示的结果。", ""))
+        return "".join(parts)
+
+    def _update_followup_block(self, **kwargs) -> None:
+        cursor = self.text_browser.textCursor()
+        cursor.setPosition(self._followup_anchor)
+        cursor.movePosition(cursor.MoveOperation.End, cursor.MoveMode.KeepAnchor)
+        cursor.removeSelectedText()
+        self._followup_anchor = cursor.position()
+        cursor.insertHtml(self._followup_block_html(**kwargs))
+        self.text_browser.setTextCursor(cursor)
+
     def adjust_text_size(self, delta: int) -> None:
-        self.text_size = max(11, min(17, self.text_size + delta))
-        self._apply_style()
-        explanation = _compose_explanation(self.payload)
-        if self.payload:
-            self.preview_browser.setHtml(_html_with_terms(explanation, self.term_map, font_size=self.text_size))
-            self.explanation_view.setHtml(_html_with_terms(explanation, self.term_map, font_size=self.text_size))
+        font = self.text_browser.font()
+        current = font.pixelSize() or 13
+        size = max(10, min(18, current + delta))
+        font.setPixelSize(size)
+        self.text_browser.setFont(font)
+        self._fit_width_peak = 0
+        self._fit_height_peak = 0
+        self._fit_to_content()
 
-    def _show_compact(self) -> None:
-        self._is_compact = True
-        self.stack.setCurrentIndex(0)
-        self.resize(self._compact_size)
+    def _copy_text(self) -> None:
+        parts = [self.text_browser.toPlainText().strip()]
+        if self.tip_content.text().strip():
+            parts.append(self.tip_content.text().strip())
+        QApplication.clipboard().setText("\n".join(part for part in parts if part))
 
-    def _show_expanded(self, index: int) -> None:
-        if self.stack.currentIndex() == 0:
-            self._save_compact_size()
-        self._is_compact = False
-        self.stack.setCurrentIndex(1)
-        self._set_detail_tab(index)
-        self.resize(1180, 760)
-
-    def _set_detail_tab(self, index: int) -> None:
-        self.detail_stack.setCurrentIndex(index)
-        for button_index, button in enumerate(self.tab_buttons):
-            button.setChecked(button_index == index)
-
-    def _show_term_detail(self, term: str) -> None:
-        key = html.unescape(unquote(term or "")).strip()
-        if not key:
+    def _send_followup(self) -> None:
+        if self._busy:
             return
-        text = self.term_map.get(key, "")
-        if not text:
-            return
-        self.term_detail_browser.setHtml(_simple_html(text, self.text_size))
-
-    def _send_followup(self, mode: str) -> None:
         question = self.followup_input.text().strip()
+        source_text = str(self.payload.get("source_text") or "").strip()
         if not question:
             return
+        if not source_text:
+            self.set_status("当前结果没有可追问的 OCR 原文。")
+            return
         self.followup_input.clear()
-        self._append_followup_line("我", question)
-        self._append_followup_line("AI", "正在回答...")
-        self.request_followup.emit(self.payload.get("source_text") or "", question, mode)
+        self.request_followup.emit(source_text, question, "custom")
 
-    def _preset_followup(self, question: str, mode: str) -> None:
-        self.followup_input.setText(question)
-        self._send_followup(mode)
-        self._show_expanded(2)
+    def _send_retry(self) -> None:
+        capture_id = self.payload.get("capture_id")
+        if isinstance(capture_id, int) and capture_id > 0:
+            self.request_retry.emit(capture_id)
 
-    def _render_followup_history(self) -> None:
-        self.followup_history.setPlainText("")
-        if self.payload.get("source_text"):
-            self._append_followup_line("OCR", self.payload.get("source_text") or "")
-        if self.payload.get("explanation"):
-            self._append_followup_line("AI", self.payload.get("explanation") or "")
+    def _set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self.followup_input.setEnabled(not busy)
+        self.send_button.setEnabled(not busy)
 
-    def _append_followup_line(self, role: str, content: str) -> None:
-        if not content:
+    def _fit_to_content(self) -> None:
+        screen = (
+            QApplication.screenAt(self.frameGeometry().center())
+            or QApplication.screenAt(QCursor.pos())
+            or QApplication.primaryScreen()
+        )
+        available = screen.availableGeometry() if screen is not None else None
+        available_width = available.width() if available is not None else 1280
+        available_height = available.height() if available is not None else 800
+
+        if self._loading:
+            self.adjustSize()
+            width = max(200, min(300, self.sizeHint().width()))
+            self.resize(width, self.height())
             return
-        current = self.followup_history.toPlainText().strip()
-        line = f"{role}：{content.strip()}"
-        self.followup_history.setPlainText(f"{current}\n\n{line}".strip())
-        self.followup_history.moveCursor(QTextCursor.MoveOperation.End)
 
-    def _replace_pending_ai_line(self, content: str) -> None:
-        if not content:
+        # 6 (outer shadow margin) * 2 + 6+6 (card margins) + 2*2 (doc margins)
+        horizontal_padding = 28
+        document = self.text_browser.document()
+        ideal = int(document.idealWidth())
+        max_width = min(720, available_width - 40)
+        target_width = min(max_width, max(380, ideal + horizontal_padding))
+        target_width = max(340, target_width)
+        self._fit_width_peak = max(self._fit_width_peak, target_width)
+        target_width = self._fit_width_peak
+
+        self.resize(target_width, self.height())
+        QApplication.processEvents()
+        document.setTextWidth(self.text_browser.viewport().width())
+        height = int(document.size().height()) + 4
+        max_body_height = max(180, min(560, int(available_height * 0.55)))
+        self._fit_height_peak = max(self._fit_height_peak, min(max_body_height, height))
+        self.text_browser.setMaximumHeight(max_body_height)
+        self.text_browser.setFixedHeight(max(72, self._fit_height_peak))
+        QApplication.processEvents()
+        self.adjustSize()
+        self.resize(target_width, self.height())
+        if available is not None and self.isVisible():
+            if self.x() + self.width() > available.right():
+                self.move(available.right() - self.width() + 1, self.y())
+            if self.y() + self.height() > available.bottom():
+                self.move(self.x(), available.bottom() - self.height() + 1)
+
+    def _set_tip(self, text: str) -> None:
+        tip = compact_line_breaks(text)
+        self.tip_content.setText(tip)
+        self.tip_content.hide()
+        self.tip_toggle.setText("▸ 补充说明")
+        self.tip_toggle.setVisible(bool(tip))
+
+    def _toggle_tip(self) -> None:
+        expanded = not self.tip_content.isVisible()
+        self.tip_content.setVisible(expanded)
+        self.tip_toggle.setText("▾ 补充说明" if expanded else "▸ 补充说明")
+        self._fit_to_content()
+
+    def _move_near_cursor(self) -> None:
+        point = QCursor.pos() + QPoint(16, 18)
+        screen = QApplication.screenAt(point) or QApplication.primaryScreen()
+        if screen is None:
+            self.move(point)
             return
-        current = self.followup_history.toPlainText().strip()
-        pending = "AI：正在回答..."
-        final = f"AI：{content.strip()}"
-        if pending in current:
-            self.followup_history.setPlainText(current.replace(pending, final, 1))
-            self.followup_history.moveCursor(QTextCursor.MoveOperation.End)
+        geometry = screen.availableGeometry()
+        size = self.sizeHint()
+        x = min(max(point.x(), geometry.left()), geometry.right() - size.width())
+        y = min(max(point.y(), geometry.top()), geometry.bottom() - size.height())
+        self.move(x, y)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        self._drag_offset = None
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
             return
-        self._append_followup_line("AI", content)
-
-    def _copy_answer(self) -> None:
-        index = self.detail_stack.currentIndex()
-        if index == 0:
-            text = self.translation_view.toPlainText()
-        elif index == 1:
-            text = _compose_explanation(self.payload)
-        else:
-            text = self.followup_history.toPlainText()
-        QApplication.clipboard().setText(text)
-
-    def _copy_markdown(self) -> None:
-        QApplication.clipboard().setText(_payload_markdown(self.payload))
-
-    def _show_readonly_notice(self) -> None:
-        QToolTip.showText(self.mapToGlobal(self.rect().center()), "这个入口会在历史页/术语页联动后继续完善。", self)
-
-    def _set_context(self, source_text: str, translation: str, explanation: str) -> None:
-        _set_context_body(self.source_context, _compact_text(source_text, 220))
-        _set_context_body(self.translation_context, _compact_text(translation, 220))
-        _set_context_body(self.summary_context, _compact_text(explanation, 260))
+        super().keyPressEvent(event)
 
     def force_close(self) -> None:
-        self._allow_close = True
-        self._save_compact_size()
         self.close()
-
-    def _load_compact_size(self) -> QSize:
-        if self.settings_store is None:
-            return DEFAULT_COMPACT_SIZE
-        try:
-            values = self.settings_store.get_settings()
-            width = int(values.get(COMPACT_WIDTH_KEY, str(DEFAULT_COMPACT_SIZE.width())))
-            height = int(values.get(COMPACT_HEIGHT_KEY, str(DEFAULT_COMPACT_SIZE.height())))
-        except (TypeError, ValueError, AttributeError):
-            return DEFAULT_COMPACT_SIZE
-        width = min(max(width, 420), 1200)
-        height = min(max(height, 260), 900)
-        return QSize(width, height)
-
-    def _save_compact_size(self) -> None:
-        if self.settings_store is None or not self._is_compact:
-            return
-        size = self.size()
-        if size.width() < 420 or size.height() < 260:
-            return
-        self._compact_size = size
-        try:
-            self.settings_store.set_setting(COMPACT_WIDTH_KEY, str(size.width()))
-            self.settings_store.set_setting(COMPACT_HEIGHT_KEY, str(size.height()))
-        except AttributeError:
-            return
-
-
-def _panel() -> QFrame:
-    panel = QFrame()
-    panel.setObjectName("panel")
-    panel.setStyleSheet(
-        f"""
-        QFrame#panel {{
-            background: #ffffff;
-            border: 1px solid {BORDER};
-            border-radius: 12px;
-        }}
-        """
-    )
-    return panel
-
-
-def _context_card(title: str, color: str) -> QFrame:
-    card = QFrame()
-    card.setObjectName("contextCard")
-    card.setMinimumHeight(112)
-    card.setStyleSheet(
-        f"""
-        QFrame#contextCard {{
-            background: #ffffff;
-            border: 1px solid {BORDER};
-            border-radius: 10px;
-        }}
-        """
-    )
-    layout = QVBoxLayout(card)
-    layout.setContentsMargins(12, 10, 12, 10)
-    layout.setSpacing(8)
-    header = QLabel(f"▣  {title}")
-    header.setStyleSheet(f"color:{color}; font-weight:800;")
-    body = QLabel("无")
-    body.setObjectName("contextBody")
-    body.setWordWrap(True)
-    body.setStyleSheet("color:#344054; line-height:1.4;")
-    foot = QLabel("共 0 行")
-    foot.setObjectName("contextFoot")
-    foot.setStyleSheet(f"color:{MUTED};")
-    layout.addWidget(header)
-    layout.addWidget(body, 1)
-    layout.addWidget(foot)
-    return card
-
-
-def _set_context_body(card: QFrame, text: str) -> None:
-    body = card.findChild(QLabel, "contextBody")
-    foot = card.findChild(QLabel, "contextFoot")
-    if body is not None:
-        body.setText(text or "无")
-    if foot is not None:
-        lines = len([line for line in (text or "").splitlines() if line.strip()])
-        foot.setText(f"共 {lines or 1} 行" if text else "共 0 行")
-
-
-def _action_card(text: str) -> QPushButton:
-    button = QPushButton(text)
-    button.setObjectName("actionCard")
-    button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-    return button
-
-
-def _action_button(text: str, tooltip: str = "") -> QPushButton:
-    button = QPushButton(text)
-    button.setObjectName("actionButton")
-    button.setCursor(Qt.CursorShape.PointingHandCursor)
-    if tooltip:
-        button.setToolTip(tooltip)
-    return button
-
-
-def _compose_explanation(payload: dict) -> str:
-    explanation = payload.get("explanation") or ""
-    learning_tip = payload.get("learning_tip") or ""
-    if learning_tip:
-        explanation = f"{explanation}\n\n学习建议：{learning_tip}".strip()
-    terms = [str(item.get("term") or "").strip() for item in payload.get("terms") or []]
-    terms = [term for term in terms if term]
-    if terms:
-        explanation = f"{explanation}\n\n关键词：{'、'.join(terms)}".strip()
-    return explanation or "无解释"
-
-
-def _build_term_map(terms: list[dict]) -> dict[str, str]:
-    mapping: dict[str, str] = {}
-    for item in terms:
-        term = str(item.get("term") or "").strip()
-        if not term:
-            continue
-        name = str(item.get("chinese_name") or "").strip()
-        explanation = str(item.get("beginner_explanation") or "").strip()
-        examples = item.get("examples") or []
-        text = term
-        if name:
-            text += f" / {name}"
-        if explanation:
-            text += f"\n{explanation}"
-        if examples:
-            text += "\n" + "\n".join(f"- {example}" for example in examples)
-        mapping[term] = text
-    return mapping
-
-
-def _html_with_terms(text: str, term_map: dict[str, str], font_size: int = 13) -> str:
-    escaped = html.escape(text or "")
-    for term in sorted(term_map, key=len, reverse=True):
-        safe_term = html.escape(term)
-        escaped = escaped.replace(
-            safe_term,
-            f'<a href="{html.escape(term, quote=True)}" style="color:{BLUE}; text-decoration: underline;">{safe_term}</a>',
-        )
-    return f"<div style='font-size:{font_size}px; line-height:1.55; white-space:pre-wrap; color:#1f2a44;'>{escaped}</div>"
-
-
-def _simple_html(text: str, font_size: int = 13) -> str:
-    return f"<div style='font-size:{font_size}px; line-height:1.55; color:#1f2a44; white-space:pre-wrap;'>{html.escape(text)}</div>"
-
-
-def _compact_text(value: str, limit: int) -> str:
-    text = " ".join((value or "").split())
-    if not text:
-        return ""
-    return text if len(text) <= limit else f"{text[:limit]}..."
-
-
-def _payload_markdown(payload: dict) -> str:
-    tags = payload.get("tags") or []
-    return f"""# AI 截图解释
-
-截图：{payload.get("image_path") or "未保存"}
-标签：{"、".join(tags) if tags else "无"}
-
-## 原文
-
-{payload.get("source_text") or "无"}
-
-## 翻译
-
-{payload.get("translation") or "无"}
-
-## 解释
-
-{_compose_explanation(payload)}
-"""

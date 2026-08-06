@@ -16,8 +16,8 @@
 核心工作流：
 
 ```
-用户按 Ctrl+Alt+T → 框选屏幕区域 → 保存截图 → Tesseract OCR 本地识别文字
-→ AI (OpenAI兼容API) 返回结构化JSON → 弹窗显示翻译/解释/术语
+用户按 Ctrl+Alt+T → 多屏框选 → MSS 保存截图 → RapidOCR 本地识别文字
+→ AI (OpenAI兼容API) 流式返回结构化JSON → 弹窗实时显示翻译/解释
 → SQLite 自动保存完整记录 → 数据统计/术语沉淀/导出
 ```
 
@@ -27,7 +27,7 @@
 
 ### 核心功能
 - **全局热键截图翻译** - Ctrl+Alt+T 在任何软件上方框选即可
-- **本地 OCR** - Tesseract 便携版内置，无需安装，支持中英文
+- **本地 OCR** - RapidOCR + ONNX Runtime，支持中英文
 - **AI 翻译解释** - 小白友好型解释，不只是翻译，更讲"这是什么"
 - **术语自动提取** - AI 识别关键术语，按出现次数沉淀
 - **追问对话** - 可对结果追问，三种模式：更简单/举例子/重新解释
@@ -55,16 +55,16 @@
 | GUI | PySide6 (Qt 6) | 桌面应用框架 |
 | Screen Capture | mss | 原生分辨率截图 |
 | Global Hotkey | pynput | Ctrl+Alt+T 系统级热键 |
-| OCR Engine | Tesseract 5.x (bundled) | 本地文字识别 |
+| OCR Engine | RapidOCR + ONNX Runtime | 本地中英文识别 |
 | AI | OpenAI-compatible API | 翻译+解释（默认gpt-4.1-mini） |
 | Database | SQLite + FTS5 | 本地存储+全文搜索 |
 | Packaging | setuptools | 可编辑安装 |
-| Testing | pytest | 27 个单元测试 |
+| Testing | pytest | 32 个自动化测试 |
 
 **Design choices:**
 - 无 requests/httpx 依赖，使用 urllib 标准库
-- 无 PaddleOCR 等重依赖，坚持轻量化
-- 便携版 Tesseract 内置 vendor/ 目录（~176MB），不依赖系统安装
+- 不依赖 PaddleOCR 或外部 Tesseract 可执行文件
+- OCR 模型和运行时由 Python 依赖统一安装
 
 ## 5. Architecture
 
@@ -78,8 +78,9 @@ ai-learning-copilot/
 │   ├── services/            # 业务逻辑层
 │   │   ├── ai_client.py     # OpenAI API 客户端 + JSON 解析
 │   │   ├── history_store.py # SQLite 数据层 (5表 + FTS5)
-│   │   ├── ocr.py           # Tesseract OCR 服务
-│   │   ├── screenshot.py    # 截图选择器UI + mss 捕获
+│   │   ├── ocr.py           # RapidOCR 服务
+│   │   ├── screenshot.py    # 截图子进程调用与错误处理
+│   │   ├── screenshot_worker.py # tkinter 多屏选区 + MSS 捕获
 │   │   ├── prompt_builder.py# AI 提示词模板
 │   │   ├── settings.py      # 应用设置 dataclass
 │   │   ├── categorizer.py   # 自动分类（关键词+正则）
@@ -92,11 +93,8 @@ ai-learning-copilot/
 │   │   └── statistics_widgets.py # 自定义图表组件
 │   └── data/                # 运行时数据 (gitignore)
 ├── docs/
-│   ├── product_plan.md      # 产品计划
-│   ├── codex_tasks.md       # 迭代任务记录
-│   └── iteration_log.md     # 开发日志
+│   └── product_plan.md      # 产品计划
 ├── tests/                   # 27 个 pytest 单元测试
-├── vendor/tesseract/        # 便携版 Tesseract (~176MB)
 └── pyproject.toml           # 项目配置 [app*] 包
 ```
 
@@ -140,11 +138,11 @@ MUTED      = #868e96   次要文字
 ## 7. Project Selling Points (for portfolio)
 
 1. **第一性原理设计** - 不停留在"能加就加"，每个功能都经过论证（详见 docs/iteration_log.md）
-2. **零依赖 OCR** - 内置便携版 Tesseract，用户无需额外安装
+2. **统一 OCR 依赖** - RapidOCR 通过 Python 包安装，无外部可执行文件和语言包配置
 3. **自绘制图表** - 无第三方图表库，纯 QPainter 实现饼图/柱状图/热力图
 4. **自动分类引擎** - 基于正则 + 关键词权重的轻量级分类器
 5. **数据所有权** - 纯本地 SQLite，无账号、无云同步、用户完全掌握数据
-6. **测试覆盖** - 27 个单元测试，核心数据层全覆盖
+6. **测试覆盖** - 32 个自动化测试，覆盖数据层、OCR、截图服务和流式主链路
 7. **Schema 迁移** - ALTER TABLE 自动迁移，老用户无感升级
 8. **语义搜索预留** - Embedding 表 + 服务接口已就位，后续仅需对接 API
 
@@ -185,8 +183,8 @@ pytest tests/ -v
 ## 10. Stats
 
 - **代码行数:** ~3000 行 Python
-- **测试:** 27 个单元测试，全部通过
+- **测试:** 32 个自动化测试，全部通过
 - **数据库表:** 5 实体表 + 1 FTS 虚拟表
 - **UI 页面:** 7 个主页面 + 弹窗 + 大窗
 - **自定义图表:** 4 种（统计卡片/饼图/柱状图/热力图）
-- **依赖:** 仅 3 个第三方包（PySide6, mss, pynput）
+- **主要依赖:** PySide6、mss、pynput、rapidocr-onnxruntime

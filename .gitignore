@@ -9,16 +9,18 @@ dist/
 build/
 *.egg-info/
 
+# AI 工具本地工作目录（不随仓库分发）
+.agents/
+.codex/
+.codex-audit/
+.claude/
+.cursor/
+.superdesign/
+
 app/data/app.db
-app/data/app.db-*
+app/data/app.db*
 app/data/screenshots/*
 !app/data/screenshots/.gitkeep
+app/data/exports/
 .env
 *.log
-
-# Keep the source repository light. Ship portable OCR through releases/installers later.
-vendor/tesseract/*
-!vendor/tesseract/README.md
-!vendor/tesseract/tessdata/
-vendor/tesseract/tessdata/*
-!vendor/tesseract/tessdata/.gitkeep

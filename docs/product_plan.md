@@ -18,9 +18,9 @@
 2. 应用隐藏主窗口并打开全屏截图遮罩。
 3. 用户拖拽选择任意区域。
 4. 应用保存临时截图。
-5. Tesseract 本地识别中英文文字，默认语言 `eng+chi_sim`。
-6. 云端 AI 返回固定 JSON。
-7. 结果弹窗显示翻译、解释、术语和标签。
+5. RapidOCR 本地识别中英文文字。
+6. 云端 AI 流式返回固定 JSON。
+7. 结果弹窗实时显示翻译和解释，完成后展示术语和标签。
 8. SQLite 保存完整记录。
 
 ## 后续方向
@@ -29,6 +29,6 @@
 - 增加 embedding，把历史记录升级成可语义搜索的个人知识库。
 - 增加自动分类：报错、AI 概念、Python、数据库、网络等。
 - 打包 Windows 安装包，再适配 macOS 和 Linux 权限差异。
-- 保持 OCRProvider 边界，后续可接 Windows 系统 OCR 或 RapidOCR。
+- 保持 OCRProvider 边界，后续可接 Windows 系统 OCR。
 - 截图保存优先使用 `mss` 原生物理像素，避免高 DPI 缩放导致 OCR 输入模糊。
 - 如果要给别人发布，再考虑 Tauri + React 重构安装体验和 UI。
