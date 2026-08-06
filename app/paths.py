@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 
-APP_DIR = Path(__file__).resolve().parent
+def _base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = _base_dir()
 PROJECT_DIR = APP_DIR.parent
 DATA_DIR = APP_DIR / "data"
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
