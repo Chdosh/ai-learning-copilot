@@ -71,5 +71,3 @@ python -m app
 - 数据库：`app/data/app.db`
 - 截图：`app/data/screenshots/`
 - Markdown 导出：`app/data/exports/`
-
-API Key 和学习记录保存在本地 SQLite。数据库、截图与导出结果不应提交到 Git。
