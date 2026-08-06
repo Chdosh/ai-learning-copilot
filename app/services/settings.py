@@ -7,8 +7,8 @@ from app.services.history_store import HistoryStore
 from app.services.prompt_builder import render_context_block
 
 
-DEFAULT_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL = "gpt-4.1-mini"
+DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_HOTKEY = "<ctrl>+<alt>+t"
 
 

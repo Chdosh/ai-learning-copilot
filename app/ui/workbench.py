@@ -52,17 +52,8 @@ class WorkbenchPage(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 22, 28, 22)
-        layout.setSpacing(14)
-
-        title = QLabel("工作台")
-        title.setStyleSheet("font-size: 24px;")
-        layout.addWidget(title)
-        subtitle = QLabel("识别内容并按当前学习方向解释；学习方向决定解释的领域，可一键切换。")
-        subtitle.setStyleSheet(f"color: {MUTED};")
-        subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
-        layout.addSpacing(6)
+        layout.setContentsMargins(34, 28, 34, 28)
+        layout.setSpacing(10)
 
         layout.addWidget(self._build_learn_card())
         layout.addWidget(self._build_direction_card())
@@ -167,7 +158,7 @@ class WorkbenchPage(QWidget):
 
         footer = QHBoxLayout()
         footer.setSpacing(8)
-        summary_button = QPushButton("从摘要新建方向")
+        summary_button = QPushButton("自定义方向")
         summary_button.setStyleSheet(
             f"QPushButton {{ border: 1px solid {BORDER}; border-radius: 8px; padding: 5px 12px; background: #fff; }}"
         )

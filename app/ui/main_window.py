@@ -77,6 +77,7 @@ class MainWindow(QMainWindow):
         self.hotkey_manager: HotkeyManager | None = None
         self.tray: QSystemTrayIcon | None = None
         self._capturing: bool = False
+        self._was_visible_before_capture: bool | None = None
         self.capture_worker: CaptureStreamWorker | None = None
         self.followup_worker: FollowupWorker | None = None
         self._history_records: list[CaptureRecord] = []
@@ -90,7 +91,7 @@ class MainWindow(QMainWindow):
         self._last_payload: dict = {}
         self._active_history_filter: str = "全部"
         self._suggest_source: str = ""
-        self.ui_font_size = 13
+        self.ui_font_size = 11
 
         self.result_window = ResultWindow()
         self.result_window.request_followup.connect(self.ask_followup)
@@ -98,8 +99,8 @@ class MainWindow(QMainWindow):
         self.result_window.open_history.connect(self.show_overview)
 
         self.setWindowTitle("AI Learning Copilot")
-        self.resize(1280, 820)
-        self.setMinimumSize(1060, 680)
+        self.resize(855, 550)
+        self.setMinimumSize(710, 455)
         self._set_native_titlebar_color()
         self._apply_text_size()
         self._build_ui()
@@ -115,9 +116,17 @@ class MainWindow(QMainWindow):
         if self._capturing:
             return
         self._capturing = True
+        self._was_visible_before_capture = self.isVisible()
         self.status_label.setText("准备截图，右键或 Esc 可取消。")
         self.hide()
         QTimer.singleShot(200, self._run_capture)
+
+    def _restore_window_after_capture(self) -> None:
+        if self._was_visible_before_capture is None:
+            return
+        if self._was_visible_before_capture:
+            self.show_normal()
+        self._was_visible_before_capture = None
 
     def _run_capture(self) -> None:
         class CaptureThread(QThread):
@@ -144,14 +153,14 @@ class MainWindow(QMainWindow):
     def _on_thread_capture_done(self, image_path: str) -> None:
         if not image_path:
             self._capturing = False
-            self.showNormal()
+            self._restore_window_after_capture()
             self.status_label.setText("已取消截图。")
             return
         self._on_screenshot_captured(image_path)
 
     def _on_thread_capture_failed(self, message: str) -> None:
         self._capturing = False
-        self.show_normal()
+        self._restore_window_after_capture()
         self.status_label.setText(message)
         QMessageBox.warning(self, "截图失败", message)
 
@@ -227,7 +236,7 @@ class MainWindow(QMainWindow):
         previous_signals_blocked = table.blockSignals(True)
         table.setUpdatesEnabled(False)
         try:
-            table.verticalHeader().setDefaultSectionSize(max(34, self.ui_font_size + 24))
+            table.verticalHeader().setDefaultSectionSize(max(26, self.ui_font_size + 15))
             table.setRowCount(len(terms))
             for row, term in enumerate(terms):
                 values = [
@@ -238,12 +247,10 @@ class MainWindow(QMainWindow):
                     str(term.review_count),
                     "★" if term.favorite else "",
                 ]
-                tooltip = _format_term_tooltip(term)
                 for column, value in enumerate(values):
                     item = QTableWidgetItem(value)
                     item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                     item.setData(Qt.ItemDataRole.UserRole, term.id)
-                    item.setToolTip(tooltip)
                     table.setItem(row, column, item)
 
             target_row = next(
@@ -342,7 +349,7 @@ class MainWindow(QMainWindow):
 
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(218)
+        sidebar.setFixedWidth(170)
         sidebar.setStyleSheet(
             f"""
             QFrame#sidebar {{
@@ -352,7 +359,7 @@ class MainWindow(QMainWindow):
             """
         )
         sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(14, 18, 14, 18)
+        sidebar_layout.setContentsMargins(10, 12, 10, 12)
         sidebar_layout.setSpacing(10)
 
         self.nav_buttons: list[QPushButton] = []
@@ -368,10 +375,6 @@ class MainWindow(QMainWindow):
         self._add_page(sidebar_layout, "工作台", self.workbench_page)
         self._add_page(sidebar_layout, "术语本", self._build_terms_page())
         self._add_page(sidebar_layout, "设置", self._build_settings_page())
-
-        export_button = _side_action("导出 Markdown")
-        export_button.clicked.connect(self.export_markdown)
-        sidebar_layout.addWidget(export_button)
 
         font_row = QHBoxLayout()
         font_row.setContentsMargins(4, 0, 4, 0)
@@ -392,8 +395,8 @@ class MainWindow(QMainWindow):
             QLabel#sidebarCard {{
                 background: #ffffff;
                 border: 1px solid {BORDER};
-                border-radius: 12px;
-                padding: 14px;
+                border-radius: 10px;
+                padding: 10px;
                 color: #344054;
                 line-height: 1.45;
             }}
@@ -419,7 +422,7 @@ class MainWindow(QMainWindow):
         shell_layout.addWidget(sidebar)
         shell_layout.addWidget(main_area, 1)
         self.setCentralWidget(shell)
-        self._switch_page(0)
+        self._switch_page(1)
 
     def _apply_text_size(self) -> None:
         app = QApplication.instance()
@@ -428,7 +431,7 @@ class MainWindow(QMainWindow):
             font.setFamilies(["Microsoft YaHei", "Segoe UI", "Arial"])
             font.setPixelSize(self.ui_font_size)
             app.setFont(font)
-        padding = max(5, self.ui_font_size - 7)
+        padding = max(3, self.ui_font_size - 7)
         self.setStyleSheet(
             APP_STYLE
             + f"""
@@ -555,7 +558,7 @@ class MainWindow(QMainWindow):
         self.terms_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.terms_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.terms_table.verticalHeader().setVisible(False)
-        self.terms_table.verticalHeader().setDefaultSectionSize(max(34, self.ui_font_size + 24))
+        self.terms_table.verticalHeader().setDefaultSectionSize(max(26, self.ui_font_size + 15))
         self.terms_table.setShowGrid(False)
         self.terms_table.setWordWrap(False)
         self.terms_table.itemSelectionChanged.connect(self._show_selected_term)
@@ -764,10 +767,6 @@ class MainWindow(QMainWindow):
         nav_layout = QVBoxLayout(settings_nav)
         nav_layout.setContentsMargins(18, 28, 18, 18)
         nav_layout.setSpacing(4)
-        title = QLabel("设置")
-        title.setStyleSheet("font-size:22px; ")
-        nav_layout.addWidget(title)
-        nav_layout.addSpacing(10)
 
         self.settings_pages = QStackedWidget()
         self.settings_nav_buttons: list[QPushButton] = []
@@ -802,8 +801,7 @@ class MainWindow(QMainWindow):
         self._settings_ai_content = QWidget()
         layout = QVBoxLayout(self._settings_ai_content)
         layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(14)
-        layout.addWidget(_title_block("AI 配置", "配置 OpenAI 兼容的 Chat Completions API。"))
+        layout.setSpacing(10)
 
         self.api_key_input = QLineEdit(self.settings.api_key)
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -828,10 +826,12 @@ class MainWindow(QMainWindow):
         hint_title.setStyleSheet("")
         hint_layout.addWidget(hint_title)
         hints = [
+            "DeepSeek: Base URL=https://api.deepseek.com/v1, model=deepseek-v4-flash",
+            "DeepSeek: model=deepseek-v4-pro（更强推理）",
+            "Kimi: Base URL=https://api.moonshot.cn/v1, model=kimi-k3",
             "OpenAI: Base URL=https://api.openai.com/v1, model=gpt-4.1-mini",
-            "DeepSeek: Base URL=https://api.deepseek.com/v1, model=deepseek-chat",
-            "Kimi: Base URL=https://api.moonshot.cn/v1, model=moonshot-v1-8k",
-            "Ollama: Base URL=http://localhost:11434/v1, model=llama3",
+            "本地 Ollama: Base URL=http://localhost:11434/v1, model=qwen3（API Key 任意填）",
+            "本地 LM Studio: Base URL=http://localhost:1234/v1, model=已加载的模型名",
         ]
         for hint in hints:
             lbl = QLabel(f"• {hint}")
@@ -839,6 +839,27 @@ class MainWindow(QMainWindow):
             lbl.setWordWrap(True)
             hint_layout.addWidget(lbl)
         layout.addWidget(hint_card)
+
+        local_card = _card()
+        local_layout = QVBoxLayout(local_card)
+        local_layout.setContentsMargins(18, 16, 18, 16)
+        local_title = QLabel("接入本地模型（Ollama 示例）")
+        local_title.setStyleSheet("")
+        local_layout.addWidget(local_title)
+        local_steps = [
+            "1. 安装 Ollama：https://ollama.com/download",
+            "2. 拉取模型（终端执行）：ollama pull qwen3",
+            "3. 本软件设置页填写：API Key 任意（如 ollama），"
+            "Base URL=http://localhost:11434/v1，模型名称=qwen3（或 ollama list 中任意已拉取的模型名）",
+            "4. 点击“测试连接”，通过后即可使用，无需联网、无调用费用",
+            "5. 其他本地工具（LM Studio 等）：Base URL=http://localhost:1234/v1，模型名填软件里已加载的模型",
+        ]
+        for step in local_steps:
+            lbl = QLabel(step)
+            lbl.setStyleSheet(f"color:{MUTED};")
+            lbl.setWordWrap(True)
+            local_layout.addWidget(lbl)
+        layout.addWidget(local_card)
         layout.addStretch()
 
         self._settings_ai_footer = QHBoxLayout()
@@ -857,8 +878,7 @@ class MainWindow(QMainWindow):
         self._settings_ocr_content = QWidget()
         layout = QVBoxLayout(self._settings_ocr_content)
         layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(14)
-        layout.addWidget(_title_block("OCR 配置", "配置 RapidOCR 文字识别引擎。"))
+        layout.setSpacing(10)
 
         self.ocr_status_label = QLabel("")
         self.ocr_status_label.setWordWrap(True)
@@ -904,8 +924,7 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(14)
-        layout.addWidget(_title_block("快捷键", "配置全局快捷键和应用快捷键。"))
+        layout.setSpacing(10)
 
         self.hotkey_input = QLineEdit(self.settings.hotkey)
         hotkey_card = _settings_card(
@@ -954,8 +973,7 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(14)
-        layout.addWidget(_title_block("保存与导出", "配置数据存储和导出选项。"))
+        layout.setSpacing(10)
 
         self.save_screenshots_checkbox = QCheckBox("")
         self.save_screenshots_checkbox.setChecked(self.settings.save_screenshots)
@@ -1004,12 +1022,7 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(14)
-        layout.addWidget(_title_block(
-            "学习上下文",
-            "设定领域 + 场景 + 背景要点，之后截图/粘贴都按该上下文解释。"
-            "粘贴外部摘要可自动检测建议（见右下角\"从摘要新建\"）。",
-        ))
+        layout.setSpacing(10)
 
         card = _card()
         card_layout = QVBoxLayout(card)
@@ -1234,8 +1247,7 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(14)
-        layout.addWidget(_title_block("数据管理", "备份、恢复、清理本地 SQLite 数据库，导出 Anki 词表。"))
+        layout.setSpacing(10)
 
         data_card = _card()
         data_layout = QVBoxLayout(data_card)
@@ -1245,6 +1257,7 @@ class MainWindow(QMainWindow):
             ("备份数据库", "把当前数据库复制为备份文件。", self._backup_database),
             ("恢复数据库", "用备份文件覆盖当前数据库（会清空现有数据）。", self._restore_database),
             ("清理旧记录", "删除指定天数之前的全部记录，不可恢复。", self._cleanup_old_records),
+            ("导出 Markdown", "把学习记录导出为 Markdown 文件。", self.export_markdown),
             ("导出 Anki 词表", "把术语本导出为 Anki 兼容 CSV。", self._export_anki),
             ("优化数据库", "VACUUM 压缩数据库体积。", self._vacuum_database),
             ("数据库信息", "查看记录数、术语数、数据库大小等。", self._show_database_info),
@@ -1269,8 +1282,7 @@ class MainWindow(QMainWindow):
         content = QWidget()
         layout = QVBoxLayout(content)
         layout.setContentsMargins(34, 28, 34, 18)
-        layout.setSpacing(14)
-        layout.addWidget(_title_block("关于", "AI Learning Copilot 版本与项目信息。"))
+        layout.setSpacing(10)
 
         about_card = _card()
         about_layout = QVBoxLayout(about_card)
@@ -1443,6 +1455,7 @@ class MainWindow(QMainWindow):
 
     def _on_stream_capture_done(self, payload: dict) -> None:
         self._capturing = False
+        self._restore_window_after_capture()
         suggest_text = self._suggest_source
         self._suggest_source = ""
         if "error" in payload:
@@ -1672,7 +1685,19 @@ class MainWindow(QMainWindow):
         records = self.history_store.search_captures(limit=1000)
         export_dir = DATA_DIR / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
-        path = export_dir / f"learning-notes-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+        default_name = f"learning-notes-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+        from PySide6.QtWidgets import QFileDialog
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出 Markdown",
+            str(export_dir / default_name),
+            "Markdown (*.md)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".md"):
+            path += ".md"
         lines = ["# AI Learning Copilot 学习记录", ""]
         for record in records:
             lines.extend(
@@ -1695,7 +1720,7 @@ class MainWindow(QMainWindow):
                     "",
                 ]
             )
-        path.write_text("\n".join(lines), encoding="utf-8")
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
         QMessageBox.information(self, "导出完成", f"已导出到：\n{path}")
 
     def quit_app(self) -> None:
@@ -1732,26 +1757,9 @@ def _card() -> QFrame:
     return frame
 
 
-def _title_block(title: str, subtitle: str) -> QWidget:
-    widget = QWidget()
-    widget.setObjectName("titleBlock")
-    widget.setStyleSheet("QWidget#titleBlock { background: transparent; }")
-    layout = QVBoxLayout(widget)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.setSpacing(6)
-    title_label = QLabel(title)
-    title_label.setStyleSheet("font-size:24px; ")
-    subtitle_label = QLabel(subtitle)
-    subtitle_label.setStyleSheet(f"color:{MUTED}; font-size:13px;")
-    subtitle_label.setWordWrap(True)
-    layout.addWidget(title_label)
-    layout.addWidget(subtitle_label)
-    return widget
-
-
 def _card_title(text: str) -> QLabel:
     label = QLabel(text)
-    label.setStyleSheet("font-size:16px; ")
+    label.setStyleSheet("font-size:14px; ")
     return label
 
 
@@ -1778,12 +1786,12 @@ def _nav_button(text: str) -> QPushButton:
         f"""
         QPushButton {{
             text-align: left;
-            padding: 12px 14px;
+            padding: 8px 10px;
             border: 0;
-            border-radius: 10px;
+            border-radius: 8px;
             background: transparent;
             color: #344054;
-            font-size: 14px;
+            font-size: 12px;
             
         }}
         QPushButton:hover {{
@@ -1794,29 +1802,6 @@ def _nav_button(text: str) -> QPushButton:
             background: {BLUE_SOFT};
             color: {BLUE};
             
-        }}
-        """
-    )
-    return button
-
-
-def _side_action(text: str) -> QPushButton:
-    button = QPushButton(text)
-    button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setStyleSheet(
-        f"""
-        QPushButton {{
-            text-align: left;
-            padding: 11px 14px;
-            border: 0;
-            border-radius: 10px;
-            background: transparent;
-            color: #475467;
-            font-size: 14px;
-        }}
-        QPushButton:hover {{
-            background: {BLUE_SOFT};
-            color: {BLUE};
         }}
         """
     )
@@ -1941,17 +1926,3 @@ def _split_keywords(text: str) -> list[str]:
         if word not in result:
             result.append(word)
     return result
-
-
-def _format_term_tooltip(term: TermRecord) -> str:
-    examples = "；".join(term.examples) if term.examples else "无"
-    return f"""术语：{term.term}
-中文名：{term.chinese_name or "无"}
-次数：{term.review_count}
-
-解释：
-{term.beginner_explanation or "无"}
-
-例子：
-{examples}
-"""

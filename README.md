@@ -40,8 +40,8 @@ RapidOCR 的模型与 ONNX Runtime 等依赖由 Python 包安装
 
 启动后在“设置”页填写：
 - API Key
-- Base URL，默认 `https://api.openai.com/v1`
-- Model，默认 `gpt-4.1-mini`
+- Base URL，默认 `https://api.deepseek.com/v1`
+- Model，默认 `deepseek-v4-flash`
 - 全局快捷键
 - 是否保存截图文件
 

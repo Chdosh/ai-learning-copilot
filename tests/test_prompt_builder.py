@@ -41,7 +41,13 @@ def test_followup_prompt_allows_detail_when_requested() -> None:
 
 
 def test_ai_payload_does_not_hard_cap_output() -> None:
-    client = AIClient(AppSettings(api_key="test"))
+    client = AIClient(
+        AppSettings(
+            api_key="test",
+            base_url="https://api.openai.com/v1",
+            model="gpt-4.1-mini",
+        )
+    )
     payload = client._build_payload("hello", mode="default", include_response_format=False)
 
     assert "max_tokens" not in payload

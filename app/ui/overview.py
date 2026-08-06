@@ -72,9 +72,6 @@ class OverviewPage(QWidget):
         top_bar.setStyleSheet(f"background: {BG};")
         top_layout = QHBoxLayout(top_bar)
         top_layout.setContentsMargins(18, 12, 18, 4)
-        title = QLabel('学习概览')
-        title.setStyleSheet('font-size: 18px;')
-        top_layout.addWidget(title)
         top_layout.addStretch(1)
         self.domain_filter_label = QLabel("记录筛选")
         self.domain_filter_label.setStyleSheet(f"color: {MUTED}; font-size: 13px;")
@@ -141,11 +138,11 @@ class OverviewPage(QWidget):
         panel = QWidget()
         panel.setStyleSheet(f"background: {BG};")
         v = QVBoxLayout(panel)
-        v.setContentsMargins(18, 14, 18, 14)
+        v.setContentsMargins(18, 16, 18, 16)
         v.setSpacing(8)
 
         self.header_title = QLabel("选择左侧会话开始学习")
-        self.header_title.setStyleSheet("font-size: 18px; ")
+        self.header_title.setStyleSheet("font-size: 16px; ")
         self.header_meta = QLabel("")
         self.header_meta.setStyleSheet(f"color: {MUTED}; ")
         v.addWidget(self.header_title)
@@ -154,13 +151,13 @@ class OverviewPage(QWidget):
         self.message_browser = QTextBrowser()
         self.message_browser.setOpenExternalLinks(False)
         self.message_browser.setFrameShape(QTextBrowser.Shape.NoFrame)
-        self.message_browser.document().setDocumentMargin(8)
+        self.message_browser.document().setDocumentMargin(12)
         self.message_browser.document().setDefaultStyleSheet(DOC_STYLESHEET)
         base_font = self.message_browser.font()
         base_font.setPixelSize(13)
         self.message_browser.setFont(base_font)
         self.message_browser.setStyleSheet(
-            f"QTextBrowser {{ background: #ffffff; border: 1px solid {BORDER}; border-radius: 10px; }}"
+            f"QTextBrowser {{ background: transparent; border: none; }}"
         )
         v.addWidget(self.message_browser, 1)
 
