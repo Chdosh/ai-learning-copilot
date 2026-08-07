@@ -1,0 +1,96 @@
+AI Learning Copilot 0.5.0 Beta 1
+Windows Portable 使用说明
+========================================
+
+一、运行环境
+
+- 支持 Windows 10 / 11 x64。
+- 本版本为免安装、未签名的 Beta 测试版。
+- 请先完整解压 ZIP，再运行 AI-Learning-Copilot.exe。
+- 建议解压到“文档”“桌面”或其他有写入权限的目录。
+- 不建议放到 C:\Program Files，也不要直接在压缩包内运行。
+- Windows 可能显示“未知发布者”或 SmartScreen 提示，这是未签名 Beta 的预期表现。请确认文件来自本项目 GitHub Releases，并核对 SHA-256 后再运行。
+
+二、首次配置
+
+1. 运行 AI-Learning-Copilot.exe。
+2. 打开“设置 → AI 配置”。
+3. 填写 API Key、Base URL 和模型名称，然后测试连接并保存。
+4. 打开“设置 → 快捷键”，确认全局截图快捷键。默认值为 <ctrl>+<alt>+t。
+5. 按快捷键或点击主界面的截图入口，拖拽选择需要识别的区域。
+
+常见 OpenAI 兼容配置示例：
+
+DeepSeek
+  Base URL: https://api.deepseek.com/v1
+  Model: deepseek-v4-flash
+  API Key: 你的 DeepSeek API Key
+
+OpenAI
+  Base URL: https://api.openai.com/v1
+  Model: gpt-4.1-mini
+  API Key: 你的 OpenAI API Key
+
+本地 Ollama
+  Base URL: http://localhost:11434/v1
+  Model: qwen3（或本机已下载的模型名）
+  API Key: 可填写 ollama 等任意非空文本
+
+不同服务商支持的模型名称可能变化，请以对应服务商当前控制台和文档为准。
+
+三、基础使用
+
+- 截图：按全局快捷键或点击截图入口，拖拽框选区域。
+- 取消截图：按 Esc 或点击鼠标右键。
+- OCR：截图图像由本机 RapidOCR 处理，图像默认不会上传。
+- AI 请求：OCR 提取的文本和相关提示信息会发送到你配置的 AI API 服务商。
+- 追问：在结果窗口中可以围绕本次记录继续提问。
+- 历史与术语：识别结果、解释、追问、术语和学习方向保存在本地数据库。
+- 关闭主窗口：默认最小化到系统托盘；需要彻底退出时请使用托盘菜单。
+
+四、数据、升级与迁移
+
+程序首次运行后会在 EXE 同目录创建：
+
+  data\app.db          历史记录、追问、术语和学习方向
+  data\screenshots\   仅在“保存截图文件”开启时保留截图
+  data\exports\       Markdown 等导出文件
+  data\backups\       程序自动创建的修复前备份
+
+- 默认不保存截图文件；无论 OCR 或 AI 成功、失败，临时截图都会清理。
+- API Key 保存在 Windows 凭据管理器中，不写入 app.db，也不包含在数据库备份中。
+- 移动程序时必须移动整个文件夹。只移动 EXE 会在新位置生成新的空 data 目录，看起来像历史记录丢失。
+- 升级时先退出程序并备份 data\app.db，然后只替换 EXE，保留原 data 文件夹。
+- 迁移到另一台电脑时复制整个程序文件夹，并在新电脑上重新填写 API Key。
+- 卸载前如需彻底清除凭据，可先在设置中清空 API Key，再退出程序；随后删除整个程序文件夹。
+
+五、当前未实现与限制
+
+- 没有安装器、自动更新和代码签名。
+- 暂无 macOS / Linux 发布包。
+- 术语本尚未实现间隔重复复习计划。
+- embedding 语义搜索和知识关联界面尚未接入。
+- 不提供账号、云同步、多设备同步和团队空间。
+- OCR 当前以中英文识别为主，尚无可视化语言包管理。
+
+六、常见问题
+
+1. 启动后历史记录是空的
+   检查是否只移动了 EXE。请把原来的 data 文件夹放回 EXE 同目录，或移动整个程序文件夹。
+
+2. 全局快捷键没有反应
+   检查快捷键是否被其他软件占用；在“设置 → 快捷键”中换一个组合并保存。
+
+3. AI 连接失败
+   检查网络、API Key、Base URL 和模型名；Base URL 通常需要包含 /v1。
+
+4. OCR 没有识别到文字
+   尽量框选清晰、字号较大的区域，避免透明叠层、动态画面或严重缩放后的模糊文字。
+
+5. Windows 阻止运行
+   本 Beta 未进行代码签名。请仅从项目 GitHub Releases 下载，并先核对 SHA-256；不信任来源时不要运行。
+
+项目主页与更新：
+https://github.com/Chdosh/ai-learning-copilot
+
+License: MIT
