@@ -19,6 +19,13 @@ class _FakeOCR:
         return "Token limit exceeded"
 
 
+class _FakeFailingOCR:
+    def extract_text(self, image_path: str) -> str:
+        from app.services.ocr import OCRError
+
+        raise OCRError("OCR 模型加载失败")
+
+
 class _FakeFailingStreamingClient:
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
@@ -330,6 +337,51 @@ def test_stream_capture_saves_source_text_when_ai_fails(tmp_path, monkeypatch) -
     assert record is not None
     assert record.source_text == "Token limit exceeded"
     assert record.tags == ["待处理"]
+    assert not image_path.exists()
+
+
+def test_stream_capture_deletes_image_when_ocr_fails_and_saving_is_off(
+    tmp_path, monkeypatch
+) -> None:
+    image_path = tmp_path / "capture.png"
+    image_path.write_bytes(b"fake image")
+    store = HistoryStore(tmp_path / "app.db")
+    settings = AppSettings(api_key="test-key", save_screenshots=False)
+    worker = workers.CaptureStreamWorker(
+        image_path=str(image_path),
+        settings=settings,
+        ocr_service=_FakeFailingOCR(),
+        history_store=store,
+    )
+    completed: list[dict] = []
+    worker.completed.connect(completed.append)
+
+    worker.run()
+
+    assert "error" in completed[0]
+    assert not image_path.exists()
+
+
+def test_stream_capture_keeps_image_when_saving_is_on_and_ai_fails(
+    tmp_path, monkeypatch
+) -> None:
+    image_path = tmp_path / "capture.png"
+    image_path.write_bytes(b"fake image")
+    store = HistoryStore(tmp_path / "app.db")
+    settings = AppSettings(api_key="test-key", save_screenshots=True)
+    monkeypatch.setattr(workers, "AIClient", _FakeFailingStreamingClient)
+    worker = workers.CaptureStreamWorker(
+        image_path=str(image_path),
+        settings=settings,
+        ocr_service=_FakeOCR(),
+        history_store=store,
+    )
+    completed: list[dict] = []
+    worker.completed.connect(completed.append)
+
+    worker.run()
+
+    assert "error" in completed[0]
     assert image_path.exists()
 
 

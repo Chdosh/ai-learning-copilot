@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.paths import DATA_DIR, DB_PATH, SCREENSHOTS_DIR, ensure_app_dirs
+from app import VERSION_LABEL
+from app.paths import DATA_DIR, DB_PATH, PROJECT_DIR, SCREENSHOTS_DIR, ensure_app_dirs
 from app.services.categorizer import get_all_categories
 from app.services.context_detector import DOMAIN_KEYWORDS
 from app.services.history_store import CaptureRecord, HistoryStore, TermRecord
@@ -827,6 +828,18 @@ class MainWindow(QMainWindow):
         layout.addLayout(content, 1)
         return page
 
+    def _confirm_data_operation(self, title: str, body: str, confirm_text: str) -> bool:
+        """数据管理模块的统一风险确认框：写明操作内容与风险，默认焦点在取消。"""
+        box = QMessageBox(self)
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(body)
+        confirm_button = box.addButton(confirm_text, QMessageBox.ButtonRole.AcceptRole)
+        cancel_button = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        return box.clickedButton() is confirm_button
+
     def _backup_database(self) -> None:
         from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getSaveFileName(
@@ -847,12 +860,17 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "恢复数据库", "", "SQLite (*.db *.sqlite *.sqlite3)")
         if not path:
             return
-        reply = QMessageBox.warning(
-            self, "确认恢复",
-            "恢复数据库将覆盖当前所有数据！\n请先备份当前数据。\n\n确认继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        body = (
+            "操作内容：用所选备份文件覆盖当前数据库，当前的学习记录、会话、术语与学习方向"
+            "将被整体替换为备份中的内容。\n\n"
+            "风险：\n"
+            "· 现有数据会被覆盖，操作不可撤销；\n"
+            "· 备份文件较旧时，其后新增的记录会丢失；\n"
+            "· API Key 保存在系统凭据管理器中，不受此操作影响；\n"
+            "· 已保存的截图文件不会被删除。\n\n"
+            "建议：恢复前先执行「备份数据库」留存当前数据。"
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if not self._confirm_data_operation("确认恢复数据库", body, "确认恢复"):
             return
         import shutil
         try:
@@ -872,12 +890,16 @@ class MainWindow(QMainWindow):
         n = int(days.split()[0])
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=n)).isoformat()
-        reply = QMessageBox.warning(
-            self, "确认清理",
-            f"将删除 {days} 前的所有记录（создан_at < {cutoff[:10]}）。\n不可恢复！\n\n确认继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        body = (
+            f"操作内容：删除 {days}（{cutoff[:10]}）之前创建的全部截图记录，"
+            "删除后从历史列表中消失。\n\n"
+            "风险：\n"
+            "· 删除后不可恢复，请确认不再需要这些记录；\n"
+            "· 关联的会话、消息与术语积累会一并不可见；\n"
+            "· 已保存的截图文件不会自动删除（如需清除请手动处理）。\n\n"
+            "建议：可先「导出 Markdown」或「备份数据库」留存记录。"
         )
-        if reply != QMessageBox.StandardButton.Yes:
+        if not self._confirm_data_operation("确认清理旧记录", body, "确认删除"):
             return
         count = self.history_store.delete_captures_before(cutoff)
         QMessageBox.information(self, "清理完成", f"已删除 {count} 条记录。")
@@ -911,6 +933,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "导出失败", str(exc))
 
     def _vacuum_database(self) -> None:
+        body = (
+            "操作内容：重建数据库文件（VACUUM），压缩体积、整理存储碎片。\n\n"
+            "风险：\n"
+            "· 记录内容保持不变，通常安全；\n"
+            "· 执行期间数据库暂时被占用，请勿同时进行截图或其他数据操作；\n"
+            "· 操作完成后原有数据仍然完整可用。"
+        )
+        if not self._confirm_data_operation("确认优化数据库", body, "开始优化"):
+            return
         try:
             self.history_store.vacuum()
             QMessageBox.information(self, "优化完成", "数据库已优化。")
@@ -965,7 +996,7 @@ class MainWindow(QMainWindow):
             self.settings_nav_buttons.append(btn)
             nav_layout.addWidget(btn)
         nav_layout.addStretch()
-        nav_layout.addWidget(QLabel("beta0.5.0"))
+        nav_layout.addWidget(QLabel(VERSION_LABEL))
 
         self._build_settings_ai_page()
         self._build_settings_ocr_page()
@@ -1121,28 +1152,10 @@ class MainWindow(QMainWindow):
             [
                 ("截图翻译", self.hotkey_input),
             ],
-            "格式示例: ctrl+alt+t, ctrl+alt+s。修改后自动生效。",
+            "例如：<ctrl>+<alt>+t（pynput 格式，特殊键用尖括号）。修改后自动生效。",
         )
         layout.addWidget(hotkey_card)
 
-        hk_title = QLabel("应用内快捷键")
-        hk_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
-        layout.addWidget(hk_title)
-        hotkeys = [
-            ("Ctrl + Enter", "发送追问"),
-            ("Ctrl + H", "打开历史记录页面"),
-            ("Ctrl + T", "触发截图翻译"),
-            ("A+ / A-", "调整字体大小"),
-        ]
-        for key, desc in hotkeys:
-            row = QHBoxLayout()
-            key_lbl = QLabel(key)
-            key_lbl.setStyleSheet(f" color:{PRIMARY}; min-width:120px;")
-            desc_lbl = QLabel(desc)
-            desc_lbl.setStyleSheet(f"color:{MUTED};")
-            row.addWidget(key_lbl)
-            row.addWidget(desc_lbl, 1)
-            layout.addLayout(row)
         layout.addStretch()
 
         footer = QHBoxLayout()
@@ -1171,6 +1184,7 @@ class MainWindow(QMainWindow):
                 ("自动保存会话", QLabel("开启（默认）")),
                 ("数据存储位置", QLabel(str(DATA_DIR))),
             ],
+            "截图文件默认不保存（处理完成后自动删除）；开启后截图会保留在本地。",
         )
         layout.addWidget(save_card)
 
@@ -1276,7 +1290,7 @@ class MainWindow(QMainWindow):
         name_lbl.setStyleSheet(f"font-size:{FONT_HEADING}; ")
         about_layout.addWidget(name_lbl)
 
-        ver_lbl = QLabel("版本 beta0.5.0")
+        ver_lbl = QLabel(f"版本 {VERSION_LABEL}")
         ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         ver_lbl.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
         about_layout.addWidget(ver_lbl)
@@ -1346,11 +1360,21 @@ class MainWindow(QMainWindow):
             details.append("支持语言：" + "、".join(status.available_languages))
         self.ocr_status_label.setText("\n".join(details))
 
+    def _app_icon(self) -> QIcon:
+        if getattr(sys, "frozen", False):
+            base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        else:
+            base = PROJECT_DIR
+        icon_path = base / "assets" / "icon.ico"
+        if icon_path.exists():
+            return QIcon(str(icon_path))
+        return self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+
     def _build_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
-        icon = self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-        self.tray = QSystemTrayIcon(icon, self)
+        self.setWindowIcon(self._app_icon())
+        self.tray = QSystemTrayIcon(self._app_icon(), self)
         menu = QMenu()
         capture_action = QAction("截图翻译", self)
         show_action = QAction("显示主窗口", self)

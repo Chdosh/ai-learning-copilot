@@ -101,6 +101,7 @@ class CaptureStreamWorker(QThread):
         if not source_text.strip():
             message = ocr_error or "OCR 没有识别到文字。"
             self.status.emit(message)
+            self._cleanup_screenshot()
             self.completed.emit({"error": message, "source_text": ""})
             return
 
@@ -221,6 +222,16 @@ class CaptureStreamWorker(QThread):
         payload["partial_explanation"] = partial_text
         return payload
 
+    def _cleanup_screenshot(self) -> None:
+        """When the user disabled screenshot saving, the file must not survive —
+        regardless of whether OCR / AI succeeded or failed."""
+        if self.settings.save_screenshots or not self.image_path:
+            return
+        try:
+            Path(self.image_path).unlink(missing_ok=True)
+        except OSError:
+            return None
+
     def _persist_result(
         self,
         source_text: str,
@@ -230,12 +241,9 @@ class CaptureStreamWorker(QThread):
     ) -> dict:
         term_dicts = _term_dicts(result)
         stored_image_path = self.image_path
-        if not failed and not self.settings.save_screenshots:
-            try:
-                Path(self.image_path).unlink(missing_ok=True)
-                stored_image_path = ""
-            except OSError:
-                stored_image_path = self.image_path
+        if not self.settings.save_screenshots:
+            self._cleanup_screenshot()
+            stored_image_path = ""
 
         category = auto_categorize(source_text, result.tags)
         domain = _resolve_capture_domain(

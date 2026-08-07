@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-learning-copilot"
-version = "0.5.0b0"
+dynamic = ["version"]
 description = "A fast desktop screenshot translator and AI learning assistant."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,7 @@ dependencies = [
   "mss>=9.0",
   "pynput>=1.7",
   "rapidocr-onnxruntime>=1.4",
+  "keyring>=24.0",
 ]
 
 [project.optional-dependencies]
@@ -23,6 +24,9 @@ dev = [
 
 [project.scripts]
 ai-learning-copilot = "app.main:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "app.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["app*"]

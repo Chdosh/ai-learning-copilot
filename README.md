@@ -1,33 +1,44 @@
 # AI Learning Copilot
 
-快捷键截图、本地 OCR、AI 翻译、解释，并将结果保存到SQLite。
+一键截图、本地 OCR、AI 翻译解释，自动沉淀为个人知识库。面向英文软件界面、报错信息、英文文档的学习场景。
 
-## 当前架构
-
-```text
-全局热键 / 主窗口按钮
-        ↓
-独立截图进程（tkinter 选区 + MSS 原生像素截图）
-        ↓
-RapidOCR（ONNX Runtime，中英文）
-        ↓
-OpenAI 兼容 Chat Completions 流式响应
-        ↓
-结果悬浮窗 + SQLite 历史、会话和术语
+```
+快捷键截图 → 本地 OCR → AI（OpenAI 兼容 API）→ 悬浮窗结果 + 本地知识库
 ```
 
+## 核心能力
 
-## 功能
+- **截图**：全局快捷键框选任意区域（Windows 10 / 11）
+- **本地 OCR**：RapidOCR 在本机完成，截图图像不出本机
+- **AI 翻译与解释**：流式返回翻译、小白解释、关键术语与学习建议
+- **追问对话**：对每一条截图记录连续提问
+- **术语积累**：自动提取术语、中文名与解释，支持收藏与 Anki 导出
+- **学习方向**：为不同领域 / 场景配置回答偏好与背景上下文
 
-- 自定义全局快捷键截图
-- RapidOCR 本地中英文识别，可扩展语言库
-- AI 翻译、解释、术语、标签和学习建议
-- 结果实时展示，可复制、追问、打开历史
-- 截图、原文、翻译、解释、会话和术语保存到 SQLite
+## 隐私说明
 
-## 安装
+- **OCR 在本机运行**：截图图像默认在本地处理，不会上传。
+- **发送给 AI 的内容**：仅当使用 AI 翻译 / 解释 / 追问时，OCR 提取的**文本**及相关提示信息会发送至你在设置中配置的 AI API 服务商（默认 DeepSeek，可在设置中换成任何 OpenAI 兼容接口，包括本地 Ollama）。
+- **数据存储位置**：历史记录、术语、学习方向保存在本地 SQLite 数据库，位于程序目录下 `data/`。
+- **截图文件**：默认**不保存**——截图处理完成后（无论成功或失败）自动删除。如需要截图留档，请在「设置 → 保存与导出」中开启。
+- **API Key**：保存在 Windows 凭据管理器（Credential Manager）中，不写入数据库，导出 / 备份的数据库文件也不包含凭据。
 
-要求 Python 3.10 或更高版本。截图选择器使用 Python 自带的 tkinter；Linux 如果未预装，需要通过系统包管理器安装 Tk。
+## 快速开始（Windows Beta）
+
+1. 从 [Releases](https://github.com/Chdosh/ai-learning-copilot/releases) 下载 `AI-Learning-Copilot-0.5.0-beta.1-win-x64.zip`（Portable 版，未签名，Windows 可能提示"未知发布者"，属预期行为）。
+2. 解压到任意目录，运行 `AI-Learning-Copilot.exe`。
+3. 打开「设置 → AI 配置」，填写自己的 API Key 与模型。
+4. 设置全局快捷键（默认 `<ctrl>+<alt>+t`）。
+5. 开始使用。
+
+> **Portable 说明**：所有数据保存在 exe 所在目录的 `data/` 文件夹中。移动 exe 或删除目录会同时移动 / 删除数据，升级前请先备份 `data/app.db`。卸载即删除整个目录。
+
+## 支持平台
+
+当前 Beta 主要在 **Windows 10 / 11** 上测试（全局快捷键、截图、OCR、托盘均已验证）。macOS / Linux 适配尚在计划中。
+
+## 源码开发
+
 ```powershell
 git clone https://github.com/Chdosh/ai-learning-copilot.git
 cd ai-learning-copilot
@@ -35,40 +46,28 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 ```
-RapidOCR 的模型与 ONNX Runtime 等依赖由 Python 包安装
-
-## 配置
-
-启动后在“设置”页填写：
-- API Key
-- Base URL，默认 `https://api.deepseek.com/v1`
-- Model，默认 `deepseek-v4-flash`
-- 全局快捷键
-- 是否保存截图文件
-
-也可以通过环境变量提供 AI 配置：
-```powershell
-$env:OPENAI_API_KEY="your-key"
-$env:OPENAI_BASE_URL="https://api.openai.com/v1"
-$env:OPENAI_MODEL="gpt-4.1-mini"
-```
 
 ## 运行
+
 ```powershell
 python -m app
 ```
 
 右键或 `Esc` 可以取消截图。关闭主窗口时，应用默认最小化到系统托盘。
 
-## 验证
+## 测试
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m compileall -q app
+python -m pytest -q
+python -m compileall -q app
 ```
 
 ## 数据位置
 
-- 数据库：`app/data/app.db`
-- 截图：`app/data/screenshots/`
-- Markdown 导出：`app/data/exports/`
+- 数据库：`data/app.db`
+- 截图（仅开启保存时）：`data/screenshots/`
+- Markdown 导出：`data/exports/`
+
+## License
+
+MIT
