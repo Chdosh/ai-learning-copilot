@@ -70,6 +70,29 @@ def test_settings_roundtrip_current_context_id(tmp_path) -> None:
     assert settings.current_context_id == 3
 
 
+def test_settings_service_quick_context_is_not_a_saved_custom_direction(tmp_path) -> None:
+    store = HistoryStore(tmp_path / "app.db")
+    service = SettingsService(store)
+    service.set_quick_context("医学", "学术论文")
+
+    settings = service.load()
+    assert settings.current_context_id is None
+    assert service.get_quick_context() == ("医学", "学术论文")
+    assert "领域：医学" in settings.context_block
+    assert "场景：学术论文" in settings.context_block
+    assert not [context for context in store.list_contexts() if not context.builtin]
+
+
+def test_settings_roundtrip_result_font_size(tmp_path) -> None:
+    store = HistoryStore(tmp_path / "app.db")
+    service = SettingsService(store)
+    settings = service.load()
+    settings.result_font_size = 15
+    service.save(settings)
+
+    assert service.load().result_font_size == 15
+
+
 def test_settings_service_bridges_context_record_to_block(tmp_path) -> None:
     store = HistoryStore(tmp_path / "app.db")
     service = SettingsService(store)

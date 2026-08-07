@@ -21,6 +21,7 @@ build/
 app/data/app.db
 app/data/app.db*
 app/data/app.lock
+app/data/backups/
 app/data/screenshots/*
 !app/data/screenshots/.gitkeep
 app/data/exports/

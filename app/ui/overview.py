@@ -1,6 +1,6 @@
 """学习概览页：学习记录索引、阅读面和追问入口。
 
-新建学习入口（截图/文本）在工作台页，本页负责查看与深入学习。
+新建学习入口（截图）在侧栏，本页负责查看与深入学习。
 布局：左侧历史记录索引（固定 216px） + 右侧阅读面。
 原图和原文位于阅读面上方，解释在其下方，关键词常驻在正文下方。
 """
@@ -14,7 +14,6 @@ from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QDialog,
     QFrame,
     QHBoxLayout,
@@ -36,10 +35,12 @@ from app.services.history_store import HistoryStore
 from app.services.settings import SettingsService
 from app.ui.message_render import DOC_STYLESHEET, build_result_html, render_lines
 from app.ui.theme import (
+    ArrowSendButton,
     BG,
     BORDER,
     BORDER_LIGHT,
     CARD,
+    ChevronComboBox,
     DANGER,
     DANGER_BORDER,
     DANGER_SOFT,
@@ -237,47 +238,8 @@ class _SessionDelegate(QStyledItemDelegate):
         return size
 
 
-class _FilterComboBox(QComboBox):
-    """Keep the filter affordance visible even when the native arrow is subtle."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("filterCombo")
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor(MUTED), 1.5))
-        x = self.width() - 13
-        y = self.height() // 2 - 1
-        painter.drawLine(x - 3, y, x, y + 3)
-        painter.drawLine(x, y + 3, x + 3, y)
-        painter.end()
-
-
-class _SendButton(QPushButton):
+class _SendButton(ArrowSendButton):
     """A compact send control with a font-independent arrow glyph."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("primaryButton")
-        self.setFixedSize(30, 30)
-        self.setText("")
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        active = bool(self.property("active")) and self.isEnabled()
-        color = QColor("#ffffff" if active else MUTED)
-        painter.setPen(QPen(color, 2))
-        center_x = self.width() // 2
-        center_y = self.height() // 2
-        painter.drawLine(center_x, center_y + 5, center_x, center_y - 4)
-        painter.drawLine(center_x - 4, center_y, center_x, center_y - 4)
-        painter.drawLine(center_x + 4, center_y, center_x, center_y - 4)
-        painter.end()
 
 
 class OverviewPage(QWidget):
@@ -361,17 +323,17 @@ class OverviewPage(QWidget):
             column_layout.addWidget(widget)
             filter_row.addWidget(column, 0)
 
-        self.time_filter_combo = _FilterComboBox()
+        self.time_filter_combo = ChevronComboBox()
         self.time_filter_combo.addItems(["全部", "今天", "本周"])
         self.time_filter_combo.setToolTip("时间范围")
         self.time_filter_combo.currentIndexChanged.connect(self._on_time_filter_changed)
-        add_filter_column("时间范围", self.time_filter_combo, 62)
+        add_filter_column("时间范围", self.time_filter_combo, 64)
 
-        self.domain_filter_combo = _FilterComboBox()
+        self.domain_filter_combo = ChevronComboBox()
         self.domain_filter_combo.setMaxVisibleItems(8)
         self.domain_filter_combo.setToolTip("按内容领域筛选学习记录")
         self.domain_filter_combo.currentIndexChanged.connect(self._on_domain_filter_selected)
-        add_filter_column("内容领域", self.domain_filter_combo, 62)
+        add_filter_column("内容领域", self.domain_filter_combo, 64)
 
         self.followup_filter_toggle = QPushButton("追问")
         self.followup_filter_toggle.setObjectName("followupFilter")
@@ -495,7 +457,6 @@ class OverviewPage(QWidget):
         self.center_image.setFixedSize(160, 120)
         self.center_image.setStyleSheet("background: transparent; border: none;")
         self.center_image.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.center_image.setToolTip("点击查看原始截图")
         self.center_image.clicked.connect(self._open_source_image)
         self.center_image.setVisible(False)
         screenshot_layout.addWidget(self.center_image)
@@ -569,8 +530,25 @@ class OverviewPage(QWidget):
                 background: transparent;
                 border: none;
             }}
+            QTextBrowser#readingBrowser QScrollBar:vertical {{
+                width: 6px;
+                background: {PRIMARY_SOFT};
+                margin: 0;
+            }}
+            QTextBrowser#readingBrowser QScrollBar::handle:vertical {{
+                background: #afc3f4;
+                border-radius: 3px;
+                min-height: 24px;
+            }}
+            QTextBrowser#readingBrowser QScrollBar::add-line:vertical,
+            QTextBrowser#readingBrowser QScrollBar::sub-line:vertical {{
+                height: 0;
+                border: none;
+            }}
             """
         )
+        self.message_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.message_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.message_browser.setMinimumHeight(160)
         v.addWidget(self.message_browser, 1)
 
@@ -655,6 +633,9 @@ class OverviewPage(QWidget):
             context = self.history_store.get_context(settings.current_context_id)
             if context is not None:
                 name = context.name
+        else:
+            domain, scene = self.settings_service.get_quick_context()
+            name = f"{domain} · {scene}" if scene != "通用" else domain
         self.direction_label.setText(f"学习方向 · {name}")
 
     def _on_time_filter_changed(self, index: int) -> None:

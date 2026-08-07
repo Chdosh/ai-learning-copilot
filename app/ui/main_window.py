@@ -4,13 +4,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, QThread, Signal
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QThread, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
-    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -22,9 +21,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QInputDialog,
     QPushButton,
-    QListWidget,
-    QListWidgetItem,
     QScrollArea,
+    QScrollBar,
     QSizePolicy,
     QStackedWidget,
     QStyle,
@@ -38,13 +36,12 @@ from PySide6.QtWidgets import (
 
 from app.paths import DATA_DIR, DB_PATH, SCREENSHOTS_DIR, ensure_app_dirs
 from app.services.categorizer import get_all_categories
-from app.services.context_detector import DOMAIN_KEYWORDS, suggest_context
+from app.services.context_detector import DOMAIN_KEYWORDS
 from app.services.history_store import CaptureRecord, HistoryStore, TermRecord
 from app.services.ocr import OCRService
 from app.services.screenshot import ScreenshotError, take_screenshots
 from app.services.hotkey import HotkeyManager
 from app.services.settings import AppSettings, SettingsService
-from app.ui.context_dialog import ContextEditDialog
 from app.ui.overview import OverviewPage
 from app.ui.result_window import ResultWindow
 from app.ui.theme import (
@@ -58,8 +55,10 @@ from app.ui.theme import (
     FONT_BODY,
     FONT_HEADING,
     FONT_MICRO,
+    FONT_TITLE,
     MUTED,
     PRIMARY,
+    PRIMARY_DARK,
     PRIMARY_SOFT,
     RADIUS_LG,
     RADIUS_MD,
@@ -70,7 +69,6 @@ from app.ui.theme import (
     apply_primary_button_style,
     button_qss,
     card_qss,
-    chip_qss,
     ensure_label_backgrounds_transparent,
     nav_qss,
 )
@@ -99,18 +97,17 @@ class MainWindow(QMainWindow):
         self._terms_page = 0
         self._terms_domain = ""
         self._terms_query = ""
-        self._terms_domain_last = ""
         self._terms_total = 0
         self._terms_pages = 1
         self._last_payload: dict = {}
         self._active_history_filter: str = "全部"
-        self._suggest_source: str = ""
         self.ui_font_size = 11
 
-        self.result_window = ResultWindow()
+        self.result_window = ResultWindow(font_size=self.settings.result_font_size)
         self.result_window.request_followup.connect(self.ask_followup)
         self.result_window.request_retry.connect(self.retry_explain)
         self.result_window.open_history.connect(self.show_overview)
+        self.result_window.font_size_changed.connect(self._save_result_font_size)
 
         self.setWindowTitle("AI Learning Copilot")
         self.resize(855, 550)
@@ -223,12 +220,14 @@ class MainWindow(QMainWindow):
 
     def refresh_terms(self) -> None:
         query = self.terms_search.text().strip() if hasattr(self, "terms_search") else ""
-        self._rebuild_terms_filter_chips(query)
-        domain = self._terms_domain
-        if query != self._terms_query or domain != self._terms_domain_last:
+        if query != self._terms_query:
             self._terms_page = 0
         self._terms_query = query
-        self._terms_domain_last = domain
+
+        counts = self.history_store.term_domain_counts(query=query)
+        if self._terms_domain not in {d for d, _ in counts}:
+            self._terms_domain = ""
+        domain = self._terms_domain
 
         self._terms_total = self.history_store.count_terms(query=query, domain=domain)
         self._terms_pages = max(1, (self._terms_total + TERMS_PAGE_SIZE - 1) // TERMS_PAGE_SIZE)
@@ -280,10 +279,13 @@ class MainWindow(QMainWindow):
             table.setUpdatesEnabled(True)
 
         self._show_selected_term()
-        self.terms_count_label.setText(f"共 {self._terms_total} 条术语")
+        header_item = self.terms_table.horizontalHeaderItem(1)
+        if header_item is not None:
+            header_item.setText(f"{self._terms_domain or '领域'} ▾")
         self.terms_page_label.setText(f"第 {self._terms_page + 1}/{self._terms_pages} 页")
         self.terms_prev_button.setEnabled(self._terms_page > 0)
         self.terms_next_button.setEnabled(self._terms_page < self._terms_pages - 1)
+        self._update_terms_hscroll_buttons()
         if hasattr(self, "sidebar_stats_value"):
             fav_count = self.history_store.count_favorite_terms()
             self.sidebar_stats_value.setText(
@@ -294,42 +296,106 @@ class MainWindow(QMainWindow):
         self._terms_page = max(0, min(page, self._terms_pages - 1))
         self.refresh_terms()
 
-    def _rebuild_terms_filter_chips(self, query: str) -> None:
-        if not hasattr(self, "terms_filter_buttons"):
+    def _on_terms_header_clicked(self, section: int) -> None:
+        if section != 1:
             return
-        counts = {domain: count for domain, count in self.history_store.term_domain_counts(query=query)}
+        counts = dict(self.history_store.term_domain_counts(query=self._terms_query))
         ordered: list[str] = []
         for direction in ["通用"] + list(DOMAIN_KEYWORDS.keys()):
             if direction in counts:
                 ordered.append(direction)
-        for extra in counts:
-            if extra not in ordered:
-                ordered.append(extra)
-        if self._terms_domain not in counts:
-            self._terms_domain = ""
+        ordered += [d for d in counts if d not in ordered]
 
-        for button in self.terms_filter_buttons.values():
-            button.setParent(None)
-            button.deleteLater()
-        self.terms_filter_buttons.clear()
+        menu = QMenu(self.terms_table)
+        menu.setObjectName("termsDomainMenu")
+        menu.setStyleSheet(
+            f"""
+            QMenu#termsDomainMenu {{
+                color: {TEXT_SECONDARY};
+                background: {CARD};
+                border: 1px solid {BORDER};
+                border-radius: {RADIUS_MD};
+                padding: 5px;
+            }}
+            QMenu#termsDomainMenu::item {{
+                padding: 6px 18px 6px 10px;
+                border-radius: 6px;
+            }}
+            QMenu#termsDomainMenu::item:selected {{ background: {PRIMARY_SOFT}; color: {PRIMARY}; }}
+            """
+        )
 
-        filter_row = self.terms_filter_layout
-        all_button = _chip_filter("全部")
-        all_button.setChecked(self._terms_domain == "")
-        all_button.clicked.connect(lambda: self._on_terms_domain_chip(""))
-        filter_row.insertWidget(filter_row.count() - 1, all_button)
-        self.terms_filter_buttons[""] = all_button
+        def add_item(label: str, domain: str) -> None:
+            action = menu.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(domain == self._terms_domain)
+            action.triggered.connect(
+                lambda checked=False, d=domain: self._set_terms_domain(d)
+            )
+
+        add_item("全部", "")
         for direction in ordered:
-            button = _chip_filter(f"{direction} ({counts[direction]})")
-            button.setChecked(direction == self._terms_domain)
-            button.clicked.connect(lambda checked=False, d=direction: self._on_terms_domain_chip(d))
-            filter_row.insertWidget(filter_row.count() - 1, button)
-            self.terms_filter_buttons[direction] = button
+            add_item(f"{direction} ({counts[direction]})", direction)
 
-    def _on_terms_domain_chip(self, domain: str) -> None:
+        header = self.terms_table.horizontalHeader()
+        x = header.sectionViewportPosition(1)
+        menu.exec(self.terms_table.viewport().mapToGlobal(QPoint(x, 0)))
+
+    def _set_terms_domain(self, domain: str) -> None:
+        if domain == self._terms_domain:
+            return
         self._terms_domain = domain
         self._terms_page = 0
         self.refresh_terms()
+
+    def _terms_scroll_h(self, direction: int) -> None:
+        bar = self.terms_table.horizontalScrollBar()
+        bar.setValue(bar.value() + direction * max(100, bar.pageStep() // 2))
+        self._update_terms_hscroll_buttons()
+
+    def _update_terms_hscroll_buttons(self) -> None:
+        bar = self.terms_table.horizontalScrollBar()
+        self.terms_hleft_button.setEnabled(bar.value() > bar.minimum())
+        self.terms_hright_button.setEnabled(bar.value() < bar.maximum())
+
+    def _layout_terms_overlay_scrollbar(self) -> None:
+        if not hasattr(self, "terms_overlay_scrollbar"):
+            return
+        rect = self.terms_table.geometry()
+        self.terms_overlay_scrollbar.setGeometry(
+            rect.x() + rect.width(), rect.top(), 3, rect.height()
+        )
+
+    def _set_terms_scrollbar_active(self, active: bool) -> None:
+        bar = self.terms_overlay_scrollbar
+        if bool(bar.property("active")) != active:
+            bar.setProperty("active", active)
+            bar.style().unpolish(bar)
+            bar.style().polish(bar)
+
+    def _hide_terms_scrollbar(self) -> None:
+        if self.terms_overlay_scrollbar.underMouse():
+            self._terms_scrollbar_timer.start()
+            return
+        self._set_terms_scrollbar_active(False)
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is getattr(self, "terms_overlay_scrollbar", None):
+            if event.type() == QEvent.Type.Enter:
+                self._terms_scrollbar_timer.stop()
+                self._set_terms_scrollbar_active(True)
+            elif event.type() == QEvent.Type.Leave:
+                self._terms_scrollbar_timer.start()
+        elif obj is getattr(self, "terms_table_viewport", None):
+            if event.type() in (
+                QEvent.Type.Wheel,
+                QEvent.Type.MouseButtonPress,
+            ):
+                self._terms_scrollbar_timer.start()
+                self._set_terms_scrollbar_active(True)
+        elif obj is getattr(self, "terms_table_card", None) and event.type() == QEvent.Type.Resize:
+            self._layout_terms_overlay_scrollbar()
+        return super().eventFilter(obj, event)
 
     def save_settings(self) -> None:
         self.settings = AppSettings(
@@ -373,14 +439,16 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.overview_page = OverviewPage(self.history_store, self.settings_service)
         self.workbench_page = WorkbenchPage(self.history_store, self.settings_service)
-        self.workbench_page.request_screenshot.connect(self.start_capture)
-        self.workbench_page.text_learn.connect(self._on_text_learn)
         self.workbench_page.context_changed.connect(self._on_context_changed)
-        self.workbench_page.open_summary_dialog.connect(self._open_context_dialog_from_summary)
         self._add_page(sidebar_layout, "获取", self.overview_page)
         self._add_page(sidebar_layout, "工作台", self.workbench_page)
         self._add_page(sidebar_layout, "术语本", self._build_terms_page())
         self._add_page(sidebar_layout, "设置", self._build_settings_page())
+        self.capture_sidebar_button = _primary_button("按下截图")
+        self.capture_sidebar_button.setFixedHeight(32)
+        self.capture_sidebar_button.setToolTip("开始截图并识别")
+        self.capture_sidebar_button.clicked.connect(self.start_capture)
+        sidebar_layout.addWidget(self.capture_sidebar_button)
 
         font_row = QHBoxLayout()
         font_row.setContentsMargins(4, 0, 4, 0)
@@ -483,13 +551,22 @@ class MainWindow(QMainWindow):
             """
         )
 
+    def _sync_terms_search_height(self) -> None:
+        if hasattr(self, "terms_search") and hasattr(self, "terms_add_button"):
+            self.terms_search.setFixedHeight(self.terms_add_button.sizeHint().height())
+
     def adjust_text_size(self, delta: int) -> None:
         self.ui_font_size = max(10, min(17, self.ui_font_size + delta))
         self._apply_text_size()
+        self._sync_terms_search_height()
         self.result_window.adjust_text_size(delta)
         if hasattr(self, "terms_table"):
             self.refresh_terms()
         self.status_label.setText("文字大小已调整。")
+
+    def _save_result_font_size(self, size: int) -> None:
+        self.settings.result_font_size = size
+        self.settings_service.save(self.settings)
 
     def _add_page(self, sidebar_layout: QVBoxLayout, title: str, page: QWidget) -> None:
         index = self.pages.addWidget(page)
@@ -510,30 +587,8 @@ class MainWindow(QMainWindow):
     def _build_terms_page(self) -> QWidget:
         page = _page()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 28, 32, 28)
+        layout.setContentsMargins(20, 10, 20, 12)
         layout.setSpacing(8)
-
-        header = QHBoxLayout()
-        header.addStretch()
-        self.terms_search = QLineEdit()
-        self.terms_search.setPlaceholderText("搜索术语")
-        self.terms_search.setFixedWidth(260)
-        self.terms_search.returnPressed.connect(self.refresh_terms)
-        header.addWidget(self.terms_search)
-        add_button = _primary_button("新增术语  +")
-        add_button.clicked.connect(self._add_manual_term)
-        header.addWidget(add_button)
-        layout.addLayout(header)
-
-        filter_row = QHBoxLayout()
-        filter_row.setSpacing(8)
-        filter_label = QLabel("领域")
-        filter_label.setStyleSheet(f"color:{MUTED};")
-        filter_row.addWidget(filter_label)
-        self.terms_filter_buttons: dict[str, QPushButton] = {}
-        self.terms_filter_layout = filter_row
-        filter_row.addStretch(1)
-        layout.addLayout(filter_row)
 
         content = QHBoxLayout()
         content.setSpacing(16)
@@ -551,7 +606,26 @@ class MainWindow(QMainWindow):
             """
         )
         table_layout = QVBoxLayout(table_card)
-        table_layout.setContentsMargins(0, 0, 0, 12)
+        table_layout.setContentsMargins(12, 8, 12, 10)
+        table_layout.setSpacing(4)
+        table_header_row = QHBoxLayout()
+        table_header_row.setSpacing(8)
+        table_header_row.addWidget(_field_title("术语列表"))
+        table_header_row.addStretch(1)
+        self.terms_search = QLineEdit()
+        self.terms_search.setPlaceholderText("搜索术语")
+        self.terms_search.setFixedWidth(150)
+        self.terms_search.setStyleSheet(
+            f"padding: 0 10px; border: 1px solid {BORDER}; "
+            f"border-radius: {RADIUS_MD}; background: {CARD};"
+        )
+        self.terms_search.returnPressed.connect(self.refresh_terms)
+        table_header_row.addWidget(self.terms_search)
+        self.terms_add_button = _primary_button("新增术语  +")
+        self.terms_add_button.clicked.connect(self._add_manual_term)
+        table_header_row.addWidget(self.terms_add_button)
+        self._sync_terms_search_height()
+        table_layout.addLayout(table_header_row)
         self.terms_table = QTableWidget(0, 6)
         self.terms_table.setObjectName("termsTable")
         self.terms_table.setFrameShape(QFrame.Shape.NoFrame)
@@ -561,37 +635,45 @@ class MainWindow(QMainWindow):
         self.terms_table.setStyleSheet(
             f"""
             QTableWidget#termsTable {{
-                background: transparent;
+                background: {CARD};
                 border: none;
                 gridline-color: transparent;
+                outline: 0;
             }}
             QTableWidget#termsTable::item {{
-                background: transparent;
-                padding: 7px;
+                background: {CARD};
+                padding: 6px 7px;
                 border-bottom: 1px solid {BORDER_LIGHT};
             }}
             QTableWidget#termsTable::item:selected {{
                 background: {PRIMARY_SOFT};
                 color: {TEXT};
             }}
+            QTableWidget#termsTable QHeaderView {{
+                background: {CARD};
+            }}
             QTableWidget#termsTable QHeaderView::section {{
-                background: transparent;
+                background: {CARD};
                 border: none;
                 border-bottom: 1px solid {BORDER_LIGHT};
-                padding: 7px;
+                padding: 4px 7px;
                 color: {MUTED};
             }}
             """
         )
-        self.terms_table.setHorizontalHeaderLabels(["术语", "领域", "中文名", "关键词", "次数", "收藏"])
+        self.terms_table.setHorizontalHeaderLabels(["术语", "领域 ▾", "中文名", "关键词", "次数", "收藏"])
         self.terms_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.terms_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.terms_table.verticalHeader().setVisible(False)
         self.terms_table.verticalHeader().setDefaultSectionSize(max(26, self.ui_font_size + 15))
         self.terms_table.setShowGrid(False)
         self.terms_table.setWordWrap(False)
+        self.terms_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.terms_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.terms_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.terms_table.itemSelectionChanged.connect(self._show_selected_term)
         table_header = self.terms_table.horizontalHeader()
+        table_header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
@@ -599,16 +681,68 @@ class MainWindow(QMainWindow):
         table_header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
         table_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         table_header.resizeSection(0, 120)
-        table_header.resizeSection(1, 88)
+        table_header.resizeSection(1, 60)
         table_header.resizeSection(2, 120)
         table_header.resizeSection(4, 48)
         table_header.resizeSection(5, 48)
+        table_header.sectionClicked.connect(self._on_terms_header_clicked)
+
+        self.terms_table_card = table_card
+        self.terms_scrollbar = self.terms_table.verticalScrollBar()
+        self.terms_table_viewport = self.terms_table.viewport()
+        self.terms_overlay_scrollbar = QScrollBar(Qt.Orientation.Vertical, table_card)
+        self.terms_overlay_scrollbar.setObjectName("termsOverlayScrollbar")
+        self.terms_overlay_scrollbar.setStyleSheet(
+            f"""
+            QScrollBar#termsOverlayScrollbar {{
+                border: none;
+                background: transparent;
+                margin: 0;
+            }}
+            QScrollBar#termsOverlayScrollbar::handle:vertical {{
+                background: transparent;
+                border-radius: 1px;
+                min-height: 24px;
+            }}
+            QScrollBar#termsOverlayScrollbar::handle:vertical[active="true"] {{
+                background: #afc3f4;
+            }}
+            QScrollBar#termsOverlayScrollbar::add-line:vertical,
+            QScrollBar#termsOverlayScrollbar::sub-line:vertical {{
+                width: 0;
+                height: 0;
+                border: none;
+            }}
+            """
+        )
+        self.terms_overlay_scrollbar.setProperty("active", False)
+        self.terms_overlay_scrollbar.style().unpolish(self.terms_overlay_scrollbar)
+        self.terms_overlay_scrollbar.style().polish(self.terms_overlay_scrollbar)
+        self.terms_overlay_scrollbar.installEventFilter(self)
+        self.terms_overlay_scrollbar.show()
+        self.terms_table_viewport.installEventFilter(self)
+        table_card.installEventFilter(self)
+        self.terms_scrollbar.valueChanged.connect(self.terms_overlay_scrollbar.setValue)
+        self.terms_overlay_scrollbar.valueChanged.connect(self.terms_scrollbar.setValue)
+        self.terms_scrollbar.rangeChanged.connect(
+            lambda _mn, _mx: self.terms_overlay_scrollbar.setRange(_mn, _mx)
+        )
+        self._terms_scrollbar_timer = QTimer(self)
+        self._terms_scrollbar_timer.setSingleShot(True)
+        self._terms_scrollbar_timer.setInterval(1800)
+        self._terms_scrollbar_timer.timeout.connect(self._hide_terms_scrollbar)
+        QTimer.singleShot(0, self._layout_terms_overlay_scrollbar)
+
         table_layout.addWidget(self.terms_table, 1)
         table_bottom = QHBoxLayout()
-        self.terms_count_label = QLabel("共 0 条术语")
-        self.terms_count_label.setStyleSheet(f"color:{MUTED}; padding-left:14px;")
-        table_bottom.addWidget(self.terms_count_label)
-        table_bottom.addStretch()
+        table_bottom.setSpacing(6)
+        self.terms_hleft_button = _page_nav_button("<")
+        self.terms_hleft_button.clicked.connect(lambda: self._terms_scroll_h(-1))
+        table_bottom.addWidget(self.terms_hleft_button)
+        self.terms_hright_button = _page_nav_button(">")
+        self.terms_hright_button.clicked.connect(lambda: self._terms_scroll_h(1))
+        table_bottom.addWidget(self.terms_hright_button)
+        table_bottom.addStretch(1)
         self.terms_prev_button = _ghost_button("上一页")
         self.terms_prev_button.clicked.connect(lambda: self._terms_goto_page(self._terms_page - 1))
         table_bottom.addWidget(self.terms_prev_button)
@@ -618,20 +752,39 @@ class MainWindow(QMainWindow):
         self.terms_next_button = _ghost_button("下一页")
         self.terms_next_button.clicked.connect(lambda: self._terms_goto_page(self._terms_page + 1))
         table_bottom.addWidget(self.terms_next_button)
+        self.terms_table.horizontalScrollBar().rangeChanged.connect(
+            lambda _mn, _mx: self._update_terms_hscroll_buttons()
+        )
         table_layout.addLayout(table_bottom)
 
         detail_panel = QWidget()
+        detail_panel.setObjectName("termDetailPanel")
         detail_panel.setStyleSheet(
-            f"QWidget {{ background: transparent; border-left: 1px solid {BORDER_LIGHT}; }}"
+            "QWidget#termDetailPanel { background: transparent; border: none; }"
         )
         detail_layout = QVBoxLayout(detail_panel)
-        detail_layout.setContentsMargins(20, 16, 0, 16)
-        detail_layout.setSpacing(8)
+        detail_layout.setContentsMargins(4, 0, 0, 0)
+        detail_layout.setSpacing(10)
+
+        term_header = QHBoxLayout()
+        term_header.setContentsMargins(0, 0, 0, 0)
+        term_header.setSpacing(8)
         self.term_name_label = QLabel("选择术语")
-        self.term_name_label.setStyleSheet(f"font-size:{FONT_HEADING}; ")
+        self.term_name_label.setStyleSheet(f"font-size:{FONT_TITLE}; color:{TEXT};")
         self.term_name_label.setWordWrap(True)
-        self.term_domain_label = QLabel("领域：-")
-        self.term_domain_label.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
+        self.term_domain_label = QLabel("-")
+        self.term_domain_label.setObjectName("termDomainBadge")
+        self.term_domain_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom
+        )
+        self.term_domain_label.setStyleSheet(
+            f"QLabel#termDomainBadge {{ color:{PRIMARY_DARK}; background:{PRIMARY_SOFT}; "
+            f"border:1px solid #dbe7ff; border-radius:{RADIUS_PILL}; padding:2px 8px; "
+            f"font-size:{FONT_MICRO}; }}"
+        )
+        term_header.addWidget(self.term_name_label, 1, Qt.AlignmentFlag.AlignBottom)
+        term_header.addWidget(self.term_domain_label, 0, Qt.AlignmentFlag.AlignBottom)
+        detail_layout.addLayout(term_header)
         self.term_chinese_label = QLabel("中文名：-")
         self.term_count_label = QLabel("出现次数：-")
         for label in (
@@ -641,8 +794,6 @@ class MainWindow(QMainWindow):
             label.setWordWrap(True)
             label.setObjectName("denseDetail")
             label.setStyleSheet("line-height:1.4;")
-        detail_layout.addWidget(self.term_name_label)
-        detail_layout.addWidget(self.term_domain_label)
         detail_layout.addWidget(_field_title("中文名"))
         detail_layout.addWidget(self.term_chinese_label)
 
@@ -806,7 +957,7 @@ class MainWindow(QMainWindow):
 
         self.settings_pages = QStackedWidget()
         self.settings_nav_buttons: list[QPushButton] = []
-        nav_labels = ["AI 配置", "OCR 配置", "快捷键", "保存与导出", "学习上下文", "数据管理", "关于"]
+        nav_labels = ["AI 配置", "OCR 配置", "快捷键", "保存与导出", "数据管理", "关于"]
         for idx, label in enumerate(nav_labels):
             btn = _nav_button(label)
             btn.setChecked(idx == 0)
@@ -814,13 +965,12 @@ class MainWindow(QMainWindow):
             self.settings_nav_buttons.append(btn)
             nav_layout.addWidget(btn)
         nav_layout.addStretch()
-        nav_layout.addWidget(QLabel("v0.1.0"))
+        nav_layout.addWidget(QLabel("beta0.5.0"))
 
         self._build_settings_ai_page()
         self._build_settings_ocr_page()
         self._build_settings_hotkey_page()
         self._build_settings_save_page()
-        self._build_settings_context_page()
         self._build_settings_data_page()
         self._build_settings_about_page()
 
@@ -844,8 +994,10 @@ class MainWindow(QMainWindow):
     def _build_settings_ai_page(self) -> None:
         self._settings_ai_content = QWidget()
         layout = QVBoxLayout(self._settings_ai_content)
-        layout.setContentsMargins(32, 28, 32, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        layout.addWidget(_page_title("AI 配置"))
 
         self.api_key_input = QLineEdit(self.settings.api_key)
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
@@ -914,8 +1066,10 @@ class MainWindow(QMainWindow):
     def _build_settings_ocr_page(self) -> None:
         self._settings_ocr_content = QWidget()
         layout = QVBoxLayout(self._settings_ocr_content)
-        layout.setContentsMargins(32, 28, 32, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        layout.addWidget(_page_title("OCR 配置"))
 
         self.ocr_status_label = QLabel("")
         self.ocr_status_label.setWordWrap(True)
@@ -956,8 +1110,10 @@ class MainWindow(QMainWindow):
     def _build_settings_hotkey_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(32, 28, 32, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        layout.addWidget(_page_title("快捷键"))
 
         self.hotkey_input = QLineEdit(self.settings.hotkey)
         hotkey_card = _settings_card(
@@ -1001,8 +1157,10 @@ class MainWindow(QMainWindow):
     def _build_settings_save_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(32, 28, 32, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        layout.addWidget(_page_title("保存与导出"))
 
         self.save_screenshots_checkbox = QCheckBox("")
         self.save_screenshots_checkbox.setChecked(self.settings.save_screenshots)
@@ -1043,237 +1201,28 @@ class MainWindow(QMainWindow):
 
         self.settings_pages.addWidget(self._settings_scroll(content))
 
-    def _build_settings_context_page(self) -> None:
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(32, 28, 32, 16)
-        layout.setSpacing(8)
-
-        card = _card()
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(24, 16, 24, 16)
-        card_layout.setSpacing(12)
-
-        self.context_list = QListWidget()
-        self.context_list.itemDoubleClicked.connect(lambda _item: self._edit_selected_context())
-        card_layout.addWidget(self.context_list, 1)
-
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        new_button = _ghost_button("新建")
-        new_button.clicked.connect(lambda: self._open_context_dialog())
-        actions.addWidget(new_button)
-        from_summary_button = _ghost_button("从摘要新建")
-        from_summary_button.clicked.connect(self._open_context_dialog_from_summary)
-        actions.addWidget(from_summary_button)
-        edit_button = _ghost_button("编辑")
-        edit_button.clicked.connect(lambda: self._edit_selected_context())
-        actions.addWidget(edit_button)
-        set_current_button = _ghost_button("设为当前")
-        set_current_button.clicked.connect(self._set_selected_context_current)
-        actions.addWidget(set_current_button)
-        delete_button = _ghost_button("删除")
-        delete_button.clicked.connect(self._delete_selected_context)
-        actions.addWidget(delete_button)
-        cleanup_button = _ghost_button("整理重复")
-        cleanup_button.clicked.connect(self._cleanup_duplicate_contexts)
-        actions.addWidget(cleanup_button)
-        actions.addStretch(1)
-        card_layout.addLayout(actions)
-
-        layout.addWidget(card, 1)
-        layout.addStretch(1)
-
-        self.settings_pages.addWidget(self._settings_scroll(content))
-        self._refresh_context_list()
-
-    def _refresh_context_list(self) -> None:
-        if not hasattr(self, "context_list"):
-            return
-        current = self.settings_service.load().current_context_id
-        self.context_list.clear()
-        for context in self.history_store.list_contexts():
-            mark = "★  " if context.id == current else ""
-            domain = "" if context.domain == "通用" else f" · {context.domain}"
-            scene = "" if context.scene == "通用" else f" · {context.scene}"
-            summary = "".join(context.summary.splitlines())
-            if len(summary) > 40:
-                summary = f"{summary[:39]}…"
-            suffix = f"  — {summary}" if summary else ""
-            item = QListWidgetItem(f"{mark}{context.name}{domain}{scene}{suffix}")
-            item.setData(Qt.ItemDataRole.UserRole, context.id)
-            self.context_list.addItem(item)
-        if current is not None and not any(
-            self.context_list.item(i).data(Qt.ItemDataRole.UserRole) == current
-            for i in range(self.context_list.count())
-        ):
-            self.settings_service.set_current_context(None)
-
-    def _selected_context_id(self) -> int | None:
-        item = self.context_list.currentItem()
-        if item is None:
-            return None
-        return int(item.data(Qt.ItemDataRole.UserRole) or 0) or None
-
-    def _open_context_dialog(self, context_id: int | None = None, prefill_text: str = "") -> None:
-        dialog = ContextEditDialog(
-            history_store=self.history_store,
-            settings_service=self.settings_service,
-            ai_settings=self.settings_service.load(),
-            context_id=context_id,
-            prefill_text=prefill_text,
-            parent=self,
-        )
-        dialog.context_saved.connect(self._on_context_saved)
-        dialog.exec()
-
-    def _open_context_dialog_from_summary(self) -> None:
-        self._open_context_dialog()
-
-    def _edit_selected_context(self) -> None:
-        context_id = self._selected_context_id()
-        if context_id is not None:
-            self._open_context_dialog(context_id=context_id)
-
-    def _set_selected_context_current(self) -> None:
-        context_id = self._selected_context_id()
-        if context_id is None:
-            QMessageBox.information(self, "设为当前", "请先选择一个上下文。")
-            return
-        self.settings_service.set_current_context(context_id)
-        self._apply_current_context()
-
-    def _delete_selected_context(self) -> None:
-        context_id = self._selected_context_id()
-        if context_id is None:
-            QMessageBox.information(self, "删除", "请先选择一个上下文。")
-            return
-        context = self.history_store.get_context(context_id)
-        if context is None or context.builtin:
-            QMessageBox.information(self, "删除", "内置上下文不可删除。")
-            return
-        reply = QMessageBox.question(
-            self,
-            "删除上下文",
-            f"确定删除「{context.name}」吗？不会影响已保存的学习记录。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        self.history_store.delete_context(context_id)
-        if self.settings_service.load().current_context_id == context_id:
-            self.settings_service.set_current_context(None)
-        self._apply_current_context()
-
-    def _on_context_saved(self, context_id: int) -> None:
-        self._apply_current_context()
-
-    def _cleanup_duplicate_contexts(self) -> None:
-        contexts = [context for context in self.history_store.list_contexts() if not context.builtin]
-        by_domain: dict[str, list] = {}
-        for context in contexts:
-            by_domain.setdefault(context.domain, []).append(context)
-
-        def _richness(context) -> int:
-            return (1 if (context.summary or "").strip() else 0) + (
-                1 if context.scene != "通用" else 0
-            )
-
-        candidates: list = []
-        for domain, group in by_domain.items():
-            if domain == "通用" or len(group) < 2:
-                continue
-            keep = max(group, key=_richness)
-            candidates.extend(context for context in group if context.id != keep.id)
-        if not candidates:
-            QMessageBox.information(self, "整理重复", "没有检测到同领域重复的上下文。")
-            return
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("整理重复上下文")
-        dialog.setMinimumSize(580, 440)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 16, 24, 16)
-        layout.setSpacing(12)
-        hint = QLabel(
-            "同一领域出现多条上下文，勾选要删除的记录（默认勾选较简单的副本，"
-            "保留含背景要点/场景更完整的一条）。删除不会影响已保存的学习记录。"
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color:{MUTED};")
-        layout.addWidget(hint)
-
-        context_list = QListWidget()
-        context_list.setStyleSheet(
-            f"QListWidget::item {{ padding: 7px 6px; border-bottom: 1px solid {BORDER_LIGHT}; }}"
-        )
-        for context in candidates:
-            summary = "".join((context.summary or "").splitlines())
-            item = QListWidgetItem(
-                f"{context.name}  ·  {context.domain} / {context.scene}"
-                + (f"  —  {summary[:24]}" if summary else "")
-            )
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            item.setData(Qt.ItemDataRole.UserRole, context.id)
-            context_list.addItem(item)
-        layout.addWidget(context_list, 1)
-
-        buttons = QHBoxLayout()
-        buttons.addStretch(1)
-        cancel_button = QPushButton("取消")
-        cancel_button.clicked.connect(dialog.reject)
-        buttons.addWidget(cancel_button)
-        confirm_button = _primary_button("删除选中")
-        buttons.addWidget(confirm_button)
-        layout.addLayout(buttons)
-
-        def _do_delete() -> None:
-            ids = [
-                context_list.item(index).data(Qt.ItemDataRole.UserRole)
-                for index in range(context_list.count())
-                if context_list.item(index).checkState() == Qt.CheckState.Checked
-            ]
-            if not ids:
-                return
-            reply = QMessageBox.question(
-                self,
-                "确认删除",
-                f"确定删除选中的 {len(ids)} 条上下文吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-            for context_id in ids:
-                if self.settings_service.load().current_context_id == context_id:
-                    self.settings_service.set_current_context(None)
-                self.history_store.delete_context(context_id)
-            dialog.accept()
-            self._apply_current_context()
-
-        confirm_button.clicked.connect(_do_delete)
-        dialog.exec()
-
     def _apply_current_context(self) -> None:
         """Single entry point after any context change: re-resolve settings and refresh UI."""
         self.settings = self.settings_service.load()
-        self._refresh_context_list()
         self.workbench_page.refresh_directions()
         self.overview_page.refresh_direction_label()
-        self.status_label.setText(f"当前学习上下文：{self._current_context_name()}")
+        self.status_label.setText(f"当前学习方向：{self._current_context_name()}")
 
     def _current_context_name(self) -> str:
         context_id = self.settings.current_context_id
         if context_id is None:
-            return "通用"
+            domain, scene = self.settings_service.get_quick_context()
+            return f"{domain} · {scene}" if scene != "通用" else domain
         context = self.history_store.get_context(context_id)
         return context.name if context is not None else "通用"
 
     def _build_settings_data_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(32, 28, 32, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        layout.addWidget(_page_title("数据管理"))
 
         data_card = _card()
         data_layout = QVBoxLayout(data_card)
@@ -1295,7 +1244,7 @@ class MainWindow(QMainWindow):
             button.clicked.connect(handler)
             row.addWidget(button)
             desc_label = QLabel(desc)
-            desc_label.setStyleSheet(f"color:{MUTED};")
+            desc_label.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
             desc_label.setWordWrap(True)
             row.addWidget(desc_label, 1)
             data_layout.addLayout(row)
@@ -1307,8 +1256,10 @@ class MainWindow(QMainWindow):
     def _build_settings_about_page(self) -> None:
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(32, 28, 32, 16)
-        layout.setSpacing(8)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        layout.addWidget(_page_title("关于"))
 
         about_card = _card()
         about_layout = QVBoxLayout(about_card)
@@ -1325,9 +1276,9 @@ class MainWindow(QMainWindow):
         name_lbl.setStyleSheet(f"font-size:{FONT_HEADING}; ")
         about_layout.addWidget(name_lbl)
 
-        ver_lbl = QLabel("版本 0.1.0")
+        ver_lbl = QLabel("版本 beta0.5.0")
         ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        ver_lbl.setStyleSheet(f"color:{MUTED};")
+        ver_lbl.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
         about_layout.addWidget(ver_lbl)
 
         desc_lbl = QLabel(
@@ -1343,7 +1294,7 @@ class MainWindow(QMainWindow):
         tech_layout = QVBoxLayout(tech_card)
         tech_layout.setContentsMargins(16, 16, 16, 16)
         tech_title = QLabel("技术栈")
-        tech_title.setStyleSheet("")
+        tech_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
         tech_layout.addWidget(tech_title)
         techs = [
             "Python 3.11 + PySide6 (Qt for Python)",
@@ -1440,50 +1391,9 @@ class MainWindow(QMainWindow):
         self.capture_worker.finished.connect(self.capture_worker.deleteLater)
         self.capture_worker.start()
 
-    def _on_text_learn(self, text: str) -> None:
-        self._suggest_source = text
-        self.result_window.show_loading()
-        self.status_label.setText("正在获取 AI 回答...")
-        self.capture_worker = CaptureStreamWorker(
-            image_path="",
-            settings=self.settings,
-            ocr_service=self.ocr_service,
-            history_store=self.history_store,
-            source_text=text,
-        )
-        self.capture_worker.status.connect(self.result_window.set_status)
-        self.capture_worker.source_ready.connect(self.result_window.set_source_text)
-        self.capture_worker.stream_chunk.connect(self.result_window.append_stream_chunk)
-        self.capture_worker.stream_terms.connect(self.result_window.set_stream_terms)
-        self.capture_worker.completed.connect(self._on_stream_capture_done)
-        self.capture_worker.finished.connect(self.capture_worker.deleteLater)
-        self.capture_worker.start()
-
-    def _maybe_suggest_context(self, text: str) -> None:
-        suggestion = suggest_context(text)
-        if not suggestion["recommended"]:
-            return
-        current_id = self.settings_service.load().current_context_id
-        if current_id is not None:
-            context = self.history_store.get_context(current_id)
-            if context is not None and not context.builtin:
-                return
-        reply = QMessageBox.question(
-            self,
-            "建议建立学习上下文",
-            "这段文本包含明显的领域信号（检测到领域/场景）。"
-            "建立学习上下文后，之后截图/粘贴都会按该领域解释。现在创建？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        self._open_context_dialog(prefill_text=text)
-
     def _on_stream_capture_done(self, payload: dict) -> None:
         self._capturing = False
         self._restore_window_after_capture()
-        suggest_text = self._suggest_source
-        self._suggest_source = ""
         if "error" in payload:
             self._last_payload = payload
             self.result_window.set_result(payload)
@@ -1496,11 +1406,8 @@ class MainWindow(QMainWindow):
         self.refresh_terms()
         self._refresh_sidebar_stats()
         self.status_label.setText("截图翻译已完成并保存。")
-        if suggest_text:
-            self._maybe_suggest_context(suggest_text)
 
-    def _on_context_changed(self, context_id: object) -> None:
-        self.settings_service.set_current_context(int(context_id) if context_id is not None else None)
+    def _on_context_changed(self, _context_id: object) -> None:
         self._apply_current_context()
 
     def _on_followup_completed(self, payload: dict) -> None:
@@ -1518,7 +1425,7 @@ class MainWindow(QMainWindow):
         row = self.terms_table.currentRow()
         if row < 0 or row >= len(self._terms_records):
             self.term_name_label.setText("选择术语")
-            self.term_domain_label.setText("领域：-")
+            self.term_domain_label.setText("-")
             self.term_chinese_label.setText("中文名：-")
             self.term_explanation_label.clear()
             self.term_example_label.clear()
@@ -1528,7 +1435,7 @@ class MainWindow(QMainWindow):
             return
         term = self._terms_records[row]
         self.term_name_label.setText(term.term)
-        self.term_domain_label.setText(f"领域：{term.domain}")
+        self.term_domain_label.setText(term.domain or "通用")
         self.term_chinese_label.setText(term.chinese_name or "无")
         self.term_explanation_label.setPlainText(term.beginner_explanation or "无")
         self.term_example_label.setPlainText("；".join(term.examples) if term.examples else "无")
@@ -1572,7 +1479,7 @@ class MainWindow(QMainWindow):
             chinese_name=chinese_name,
             beginner_explanation=explanation,
             examples=examples,
-            domain=self._terms_domain or "通用",
+            domain="通用",
         )
         self.refresh_terms()
         self.status_label.setText("术语已新增。")
@@ -1758,13 +1665,29 @@ def _card() -> QFrame:
 
 def _card_title(text: str) -> QLabel:
     label = QLabel(text)
-    label.setStyleSheet(f"font-size:{FONT_BODY}; ")
+    label.setStyleSheet(
+        f"color:{TEXT_SECONDARY}; background: transparent; border-left: 3px solid {PRIMARY}; "
+        "padding-left: 8px;"
+    )
+    label.setFixedHeight(22)
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    return label
+
+
+def _page_title(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setStyleSheet(f"font-size:{FONT_TITLE}; color:{TEXT};")
     return label
 
 
 def _field_title(text: str) -> QLabel:
     label = QLabel(text)
-    label.setStyleSheet(f" color:{TEXT_SECONDARY};")
+    label.setStyleSheet(
+        f"color:{TEXT_SECONDARY}; background: transparent; border-left: 3px solid {PRIMARY}; "
+        "padding-left: 8px;"
+    )
+    label.setFixedHeight(22)
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     return label
 
 
@@ -1773,6 +1696,11 @@ def _readonly_box(placeholder: str) -> QTextEdit:
     box.setReadOnly(True)
     box.setAcceptRichText(False)
     box.setPlaceholderText(placeholder)
+    box.setFrameShape(QTextEdit.Shape.NoFrame)
+    box.document().setDocumentMargin(0)
+    box.setStyleSheet(
+        f"QTextEdit {{ background: transparent; border: none; padding: 0; color: {TEXT_SECONDARY}; }}"
+    )
     box.setMinimumHeight(64)
     return box
 
@@ -1798,11 +1726,17 @@ def _ghost_button(text: str) -> QPushButton:
     return button
 
 
-def _chip_filter(text: str) -> QPushButton:
+def _page_nav_button(text: str) -> QPushButton:
     button = QPushButton(text)
-    button.setCheckable(True)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
-    button.setStyleSheet(chip_qss())
+    button.setFixedSize(26, 26)
+    button.setStyleSheet(
+        f"QPushButton {{ background:{CARD}; border:1px solid {BORDER}; "
+        f"border-radius:{RADIUS_MD}; padding:0; color:{TEXT_SECONDARY}; "
+        f'font-family:"Segoe UI", Arial, sans-serif; font-size:14px; }}'
+        f"QPushButton:hover {{ border-color:{PRIMARY}; color:{PRIMARY}; }}"
+        f"QPushButton:disabled {{ color:{DISABLED}; border-color:{BORDER_LIGHT}; }}"
+    )
     return button
 
 
@@ -1849,13 +1783,13 @@ def _settings_card(title: str, rows: list[tuple[str, QWidget]], note: str = "") 
         row = QHBoxLayout()
         label = QLabel(label_text)
         label.setFixedWidth(128)
-        label.setStyleSheet("")
+        label.setStyleSheet(f"color:{TEXT_SECONDARY};")
         row.addWidget(label)
         row.addWidget(field, 1)
         layout.addLayout(row)
     if note:
         note_label = QLabel(note)
-        note_label.setStyleSheet(f"color:{MUTED};")
+        note_label.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
         note_label.setWordWrap(True)
         layout.addWidget(note_label)
     return card

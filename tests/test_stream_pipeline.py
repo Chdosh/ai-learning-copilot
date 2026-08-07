@@ -525,7 +525,8 @@ def test_result_window_font_buttons_scale_content() -> None:
     app.processEvents()
     after = window.text_browser.document().size().height()
 
-    assert window.text_browser.font().pixelSize() == 16
+    assert window.text_browser.font().pixelSize() == 15
+    assert window.status_label.font().pixelSize() == 13
     assert after > before
     window.force_close()
     app.processEvents()

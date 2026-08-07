@@ -8,7 +8,8 @@
 """
 from __future__ import annotations
 
-from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QWidget
+from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QPushButton, QWidget
 
 # ---- 色板（clean 风格） ----
 PRIMARY = "#3B82F6"          # 主色
@@ -128,26 +129,63 @@ QComboBox {{
     background: {CARD};
     border: 1px solid {BORDER};
     border-radius: {RADIUS_SM};
-    padding: 4px 8px;
+    padding: 4px 6px;
 }}
 QComboBox:focus {{ border: 1px solid {PRIMARY}; }}
 QComboBox::drop-down {{
     border: none;
-    width: 22px;
+    width: 14px;
 }}
 QComboBox::down-arrow {{
     image: none;
     width: 0px;
     height: 0px;
-    border-left: 4px solid transparent;
-    border-right: 4px solid transparent;
-    border-top: 5px solid {MUTED};
-}}
-QComboBox#filterCombo::down-arrow {{
-    image: none;
-    width: 0px;
-    height: 0px;
     border: none;
+}}
+QComboBox:hover {{ border-color: {PRIMARY}; }}
+QComboBox QAbstractItemView {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    outline: 0;
+    padding: 2px;
+}}
+QComboBox QAbstractItemView::item {{
+    min-height: 24px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    color: {TEXT_SECONDARY};
+    background: transparent;
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background: {PRIMARY_SOFT};
+    color: {PRIMARY};
+}}
+QComboBox QAbstractItemView::item:selected {{
+    background: {PRIMARY_SOFT};
+    color: {PRIMARY};
+}}
+QComboBox QAbstractItemView QScrollBar:vertical {{
+    background: transparent;
+    width: 8px;
+    margin: 2px 2px 2px 0;
+}}
+QComboBox QAbstractItemView QScrollBar::handle:vertical {{
+    background: #d0d5dd;
+    border-radius: 4px;
+    min-height: 24px;
+}}
+QComboBox QAbstractItemView QScrollBar::handle:vertical:hover {{
+    background: {DISABLED};
+}}
+QComboBox QAbstractItemView QScrollBar::add-line:vertical,
+QComboBox QAbstractItemView QScrollBar::sub-line:vertical {{
+    height: 0;
+    border: none;
+    background: transparent;
+}}
+QComboBox QAbstractItemView QScrollBar::add-page:vertical,
+QComboBox QAbstractItemView QScrollBar::sub-page:vertical {{
+    background: transparent;
 }}
 {button_qss()}
 QPushButton#primaryButton {{
@@ -252,6 +290,48 @@ def ensure_label_backgrounds_transparent(root: QWidget) -> None:
             continue
         suffix = "background: transparent;"
         label.setStyleSheet(f"{style.rstrip()}\n{suffix}" if style.strip() else suffix)
+
+
+class ChevronComboBox(QComboBox):
+    """QComboBox with a font-independent painted chevron arrow (matches filter combos)."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(MUTED), 1.5))
+        x = self.width() - 11
+        y = self.height() // 2 - 1
+        painter.drawLine(x - 3, y, x, y + 3)
+        painter.drawLine(x, y + 3, x + 3, y)
+        painter.end()
+
+
+class ArrowSendButton(QPushButton):
+    """A compact send control with a font-independent arrow glyph."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("primaryButton")
+        self.setFixedSize(30, 30)
+        self.setText("")
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        active = bool(self.property("active")) and self.isEnabled()
+        color = QColor("#ffffff" if active else MUTED)
+        painter.setPen(QPen(color, 2))
+        center_x = self.width() // 2
+        center_y = self.height() // 2
+        painter.drawLine(center_x, center_y + 5, center_x, center_y - 4)
+        painter.drawLine(center_x - 4, center_y, center_x, center_y - 4)
+        painter.drawLine(center_x + 4, center_y, center_x, center_y - 4)
+        painter.end()
 
 
 def apply_primary_button_style(button: QPushButton) -> QPushButton:

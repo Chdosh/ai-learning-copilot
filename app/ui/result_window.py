@@ -27,6 +27,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.ai_client import compact_line_breaks
+from app.services.settings import (
+    DEFAULT_RESULT_FONT_SIZE,
+    MAX_RESULT_FONT_SIZE,
+    MIN_RESULT_FONT_SIZE,
+)
 from app.ui.message_render import (
     DOC_STYLESHEET,
     build_result_html,
@@ -56,9 +61,11 @@ class ResultWindow(QWidget):
     request_followup = Signal(str, str, str)
     request_retry = Signal(int)
     open_history = Signal()
+    font_size_changed = Signal(int)
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, font_size: int = DEFAULT_RESULT_FONT_SIZE) -> None:
         super().__init__(parent)
+        self._font_size = max(MIN_RESULT_FONT_SIZE, min(MAX_RESULT_FONT_SIZE, int(font_size)))
         self.payload: dict = {}
         self._drag_offset: QPoint | None = None
         self._stream_buffers = {"translation": "", "explanation": "", "learning_tip": ""}
@@ -116,12 +123,13 @@ class ResultWindow(QWidget):
         self.text_browser.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.text_browser.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         base_font = self.text_browser.font()
-        base_font.setPixelSize(13)
+        base_font.setPixelSize(self._font_size)
         self.text_browser.setFont(base_font)
+        self.text_browser.document().setDefaultFont(base_font)
         self.text_browser.document().setDocumentMargin(2)
         self.text_browser.setMinimumHeight(40)
         self.text_browser.setMaximumHeight(720)
-        self.text_browser.document().setDefaultStyleSheet(DOC_STYLESHEET)
+        self.text_browser.document().setDefaultStyleSheet(self._document_stylesheet())
         self.text_browser.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         layout.addWidget(self.text_browser)
 
@@ -180,7 +188,7 @@ class ResultWindow(QWidget):
                 background: transparent;
                 color: {TEXT};
                 font-family: "Microsoft YaHei", "Segoe UI", Arial;
-                font-size: 13px;
+                font-size: {self._font_size}px;
             }}
             QFrame#resultCard {{
                 background: {CARD};
@@ -196,7 +204,7 @@ class ResultWindow(QWidget):
                 background: transparent;
                 border: 0;
                 padding: 0;
-                font-size: 12px;
+                font-size: {max(MIN_RESULT_FONT_SIZE, self._font_size - 2)}px;
             }}
             QTextBrowser#resultBody {{
                 color: {TEXT_SECONDARY};
@@ -211,7 +219,7 @@ class ResultWindow(QWidget):
                 border: 0;
                 border-radius: {RADIUS_MD};
                 padding: 5px 8px;
-                font-size: 12px;
+                font-size: {self._font_size}px;
             }}
             QLineEdit#followupInput {{
                 color: {TEXT};
@@ -290,6 +298,17 @@ class ResultWindow(QWidget):
             }}
             """
         )
+
+    def _document_stylesheet(self) -> str:
+        title_size = max(MIN_RESULT_FONT_SIZE, self._font_size - 1)
+        return DOC_STYLESHEET + f"""
+        .lead {{ font-size: {title_size}px; }}
+        """
+
+    def _refresh_document_font(self) -> None:
+        document = self.text_browser.document()
+        document.setDefaultStyleSheet(self._document_stylesheet())
+        document.markContentsDirty(0, document.characterCount())
 
     def show_loading(self) -> None:
         self.payload = {}
@@ -536,11 +555,18 @@ class ResultWindow(QWidget):
         self.text_browser.setTextCursor(cursor)
 
     def adjust_text_size(self, delta: int) -> None:
+        current = self._font_size
+        size = max(MIN_RESULT_FONT_SIZE, min(MAX_RESULT_FONT_SIZE, current + delta))
+        if size == current:
+            return
+        self._font_size = size
         font = self.text_browser.font()
-        current = font.pixelSize() or 13
-        size = max(10, min(18, current + delta))
         font.setPixelSize(size)
         self.text_browser.setFont(font)
+        self.text_browser.document().setDefaultFont(font)
+        self._refresh_document_font()
+        self._apply_style()
+        self.font_size_changed.emit(size)
         self._fit_width_peak = 0
         self._fit_height_peak = 0
         self._fit_to_content()
