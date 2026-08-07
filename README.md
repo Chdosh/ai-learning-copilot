@@ -29,6 +29,7 @@ OpenAI 兼容 Chat Completions 流式响应
 
 要求 Python 3.10 或更高版本。截图选择器使用 Python 自带的 tkinter；Linux 如果未预装，需要通过系统包管理器安装 Tk。
 ```powershell
+git clone https://github.com/Chdosh/ai-learning-copilot.git
 cd ai-learning-copilot
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1

@@ -6,7 +6,6 @@ import html
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import (
     QAction,
-    QColor,
     QCursor,
     QKeyEvent,
     QMouseEvent,
@@ -15,7 +14,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
-    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -93,11 +91,6 @@ class ResultWindow(QWidget):
         self.card = QFrame()
         self.card.setObjectName("resultCard")
         outer_layout.addWidget(self.card)
-        shadow = QGraphicsDropShadowEffect(self.card)
-        shadow.setBlurRadius(20)
-        shadow.setOffset(0, 3)
-        shadow.setColor(QColor(31, 45, 61, 45))
-        self.card.setGraphicsEffect(shadow)
 
         layout = QVBoxLayout(self.card)
         layout.setContentsMargins(8, 4, 8, 8)
@@ -192,6 +185,7 @@ class ResultWindow(QWidget):
             }}
             QFrame#resultCard {{
                 background: {CARD};
+                border: 1px solid {BORDER};
                 border-radius: {RADIUS_LG};
             }}
             QWidget#resultWindow QLabel {{

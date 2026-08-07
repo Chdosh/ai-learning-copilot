@@ -17,6 +17,22 @@ build/
 .claude/
 .cursor/
 .superdesign/
+.opencode/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 覆盖率
+.coverage
+htmlcov/
+coverage.xml
+
+# 临时文件
+*.tmp
+*.bak
 
 app/data/app.db
 app/data/app.db*
