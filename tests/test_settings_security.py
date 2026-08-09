@@ -3,7 +3,12 @@ from __future__ import annotations
 import os
 
 from app.services.history_store import HistoryStore
-from app.services.settings import AppSettings, SettingsService
+from app.services.settings import (
+    AppSettings,
+    DpapiFileCredentialStore,
+    FallbackCredentialStore,
+    SettingsService,
+)
 
 
 class _FakeCredentialStore:
@@ -81,6 +86,90 @@ def test_api_key_falls_back_to_env_variable(tmp_path, monkeypatch) -> None:
     service = SettingsService(store, credential_store=_FakeCredentialStore())
 
     assert service.load().api_key == "sk-env-key"
+
+
+def test_dpapi_file_store_roundtrip(tmp_path) -> None:
+    path = tmp_path / "credentials.bin"
+    store = DpapiFileCredentialStore(path)
+
+    store.set_password("sk-秘密-123")
+    assert store.get_password() == "sk-秘密-123"
+    assert path.read_bytes() != "sk-秘密-123".encode("utf-8")
+
+    store.set_password("")
+    assert store.get_password() == ""
+    assert not path.exists()
+
+
+def test_dpapi_file_store_delete_removes_file(tmp_path) -> None:
+    path = tmp_path / "credentials.bin"
+    store = DpapiFileCredentialStore(path)
+    store.set_password("sk-1")
+    store.delete_password()
+    assert store.get_password() == ""
+    assert not path.exists()
+
+
+def test_float_bar_settings_roundtrip(tmp_path) -> None:
+    store = HistoryStore(tmp_path / "app.db")
+    service = SettingsService(store, credential_store=_FakeCredentialStore())
+
+    settings = service.load()
+    assert settings.show_float_bar is True
+    assert settings.bar_x is None
+    assert settings.bar_y is None
+    assert settings.bar_w is None
+    assert settings.bar_h is None
+
+    settings.show_float_bar = False
+    settings.bar_x = 1234
+    settings.bar_y = 567
+    settings.bar_w = 452
+    settings.bar_h = 210
+    service.save(settings)
+
+    reloaded = service.load()
+    assert reloaded.show_float_bar is False
+    assert reloaded.bar_x == 1234
+    assert reloaded.bar_y == 567
+    assert reloaded.bar_w == 452
+    assert reloaded.bar_h == 210
+
+
+def test_fallback_store_uses_dpapi_when_keyring_fails(tmp_path) -> None:
+    store = FallbackCredentialStore(
+        primary=_FakeCredentialStore(failing=True),
+        fallback=DpapiFileCredentialStore(tmp_path / "credentials.bin"),
+    )
+
+    store.set_password("sk-fallback")
+    assert store.get_password() == "sk-fallback"
+
+    store.delete_password()
+    assert store.get_password() == ""
+
+
+def test_service_persists_key_via_dpapi_when_keyring_unavailable(tmp_path) -> None:
+    db_store = HistoryStore(tmp_path / "app.db")
+    dpapi = DpapiFileCredentialStore(tmp_path / "credentials.bin")
+    service = SettingsService(
+        db_store,
+        credential_store=FallbackCredentialStore(
+            primary=_FakeCredentialStore(failing=True),
+            fallback=dpapi,
+        ),
+    )
+
+    service.save(AppSettings(api_key="sk-dpapi"))
+
+    reloaded = SettingsService(
+        db_store,
+        credential_store=FallbackCredentialStore(
+            primary=_FakeCredentialStore(failing=True),
+            fallback=DpapiFileCredentialStore(tmp_path / "credentials.bin"),
+        ),
+    )
+    assert reloaded.load().api_key == "sk-dpapi"
 
 
 def test_api_key_kept_in_session_when_keyring_unavailable(tmp_path) -> None:

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
 
+from app.paths import DATA_DIR
 from app.services.history_store import HistoryStore
 from app.services.prompt_builder import render_context_block
 
@@ -16,6 +21,90 @@ MAX_RESULT_FONT_SIZE = 18
 
 KEYRING_SERVICE = "AI-Learning-Copilot"
 KEYRING_API_KEY_USERNAME = "api_key"
+CREDENTIALS_PATH = DATA_DIR / "credentials.bin"
+
+_CRYPTPROTECT_UI_FORBIDDEN = 0x1
+
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [
+        ("cbData", ctypes.wintypes.DWORD),
+        ("pbData", ctypes.POINTER(ctypes.c_byte)),
+    ]
+
+
+def _dpapi_protect(data: bytes) -> bytes:
+    """Encrypt bytes with Windows DPAPI (user-bound)."""
+    buffer = ctypes.create_string_buffer(data, len(data))
+    blob_in = _DATA_BLOB(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+    blob_out = _DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    crypt32.CryptProtectData.restype = ctypes.wintypes.BOOL
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.wintypes.LPWSTR,
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.wintypes.DWORD,
+        ctypes.POINTER(_DATA_BLOB),
+    ]
+    if not crypt32.CryptProtectData(
+        ctypes.byref(blob_in),
+        None,
+        None,
+        None,
+        None,
+        _CRYPTPROTECT_UI_FORBIDDEN,
+        ctypes.byref(blob_out),
+    ):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def _dpapi_unprotect(data: bytes) -> bytes:
+    """Decrypt bytes previously protected by :func:`_dpapi_protect`."""
+    buffer = ctypes.create_string_buffer(data, len(data))
+    blob_in = _DATA_BLOB(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte)))
+    blob_out = _DATA_BLOB()
+    crypt32 = ctypes.windll.crypt32
+    crypt32.CryptUnprotectData.restype = ctypes.wintypes.BOOL
+    crypt32.CryptUnprotectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.POINTER(ctypes.wintypes.LPWSTR),
+        ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.wintypes.DWORD,
+        ctypes.POINTER(_DATA_BLOB),
+    ]
+    if not crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in),
+        None,
+        None,
+        None,
+        None,
+        _CRYPTPROTECT_UI_FORBIDDEN,
+        ctypes.byref(blob_out),
+    ):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+class CredentialStore(Protocol):
+    """Interface implemented by all credential storage backends."""
+
+    def get_password(self) -> str: ...
+
+    def set_password(self, value: str) -> None: ...
+
+    def delete_password(self) -> None: ...
 
 
 class KeyringCredentialStore:
@@ -51,6 +140,69 @@ class KeyringCredentialStore:
             return None
 
 
+class DpapiFileCredentialStore:
+    """Windows DPAPI-encrypted local file credential store.
+
+    Zero external dependencies (ctypes against Crypt32). The blob is bound
+    to the current Windows user account, so it works even in frozen
+    one-file builds where ``keyring`` and its backends are unavailable.
+    """
+
+    def __init__(self, path: str | Path = CREDENTIALS_PATH) -> None:
+        self._path = Path(path)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def get_password(self) -> str:
+        try:
+            blob = self._path.read_bytes()
+            return _dpapi_unprotect(blob).decode("utf-8")
+        except Exception:
+            return ""
+
+    def set_password(self, value: str) -> None:
+        if not value:
+            self.delete_password()
+            return
+        try:
+            self._path.write_bytes(_dpapi_protect(value.encode("utf-8")))
+        except Exception:
+            return None
+
+    def delete_password(self) -> None:
+        try:
+            self._path.unlink(missing_ok=True)
+        except Exception:
+            return None
+
+
+class FallbackCredentialStore:
+    """Credential store that chains keyring with a DPAPI file fallback.
+
+    ``get_password`` reads keyring first, then the local file; writes go to
+    both, so the API key never disappears even when the OS keyring (or its
+    backend discovery) fails inside a frozen build.
+    """
+
+    def __init__(
+        self,
+        primary: CredentialStore | None = None,
+        fallback: CredentialStore | None = None,
+    ) -> None:
+        self._primary = primary or KeyringCredentialStore()
+        self._fallback = fallback or DpapiFileCredentialStore()
+
+    def get_password(self) -> str:
+        return self._primary.get_password() or self._fallback.get_password()
+
+    def set_password(self, value: str) -> None:
+        self._primary.set_password(value)
+        self._fallback.set_password(value)
+
+    def delete_password(self) -> None:
+        self._primary.delete_password()
+        self._fallback.delete_password()
+
+
 @dataclass(slots=True)
 class AppSettings:
     api_key: str = ""
@@ -61,6 +213,11 @@ class AppSettings:
     context_block: str = ""
     current_context_id: int | None = None
     result_font_size: int = DEFAULT_RESULT_FONT_SIZE
+    show_float_bar: bool = True
+    bar_x: int | None = None
+    bar_y: int | None = None
+    bar_w: int | None = None
+    bar_h: int | None = None
 
     @classmethod
     def from_mapping(cls, values: dict[str, str]) -> "AppSettings":
@@ -76,6 +233,16 @@ class AppSettings:
         except (TypeError, ValueError):
             result_font_size = DEFAULT_RESULT_FONT_SIZE
         result_font_size = max(MIN_RESULT_FONT_SIZE, min(MAX_RESULT_FONT_SIZE, result_font_size))
+
+        def _optional_int(key: str) -> int | None:
+            raw_value = values.get(key)
+            if not raw_value:
+                return None
+            try:
+                return int(raw_value)
+            except (TypeError, ValueError):
+                return None
+
         return cls(
             base_url=values.get("base_url") or os.environ.get("OPENAI_BASE_URL", DEFAULT_BASE_URL),
             model=values.get("model") or os.environ.get("OPENAI_MODEL", DEFAULT_MODEL),
@@ -84,6 +251,11 @@ class AppSettings:
             context_block=values.get("context_block") or "",
             current_context_id=current_context_id,
             result_font_size=result_font_size,
+            show_float_bar=(values.get("show_float_bar", "true").lower() != "false"),
+            bar_x=_optional_int("bar_x"),
+            bar_y=_optional_int("bar_y"),
+            bar_w=_optional_int("bar_w"),
+            bar_h=_optional_int("bar_h"),
         )
 
     def to_mapping(self) -> dict[str, str]:
@@ -96,13 +268,18 @@ class AppSettings:
             "context_block": self.context_block,
             "current_context_id": "" if self.current_context_id is None else str(self.current_context_id),
             "result_font_size": str(self.result_font_size),
+            "show_float_bar": "true" if self.show_float_bar else "false",
+            "bar_x": "" if self.bar_x is None else str(self.bar_x),
+            "bar_y": "" if self.bar_y is None else str(self.bar_y),
+            "bar_w": "" if self.bar_w is None else str(self.bar_w),
+            "bar_h": "" if self.bar_h is None else str(self.bar_h),
         }
 
 
 class SettingsService:
-    def __init__(self, store: HistoryStore, credential_store: KeyringCredentialStore | None = None) -> None:
+    def __init__(self, store: HistoryStore, credential_store: CredentialStore | None = None) -> None:
         self.store = store
-        self._credentials = credential_store or KeyringCredentialStore()
+        self._credentials = credential_store or FallbackCredentialStore()
         self._session_api_key = ""
 
     def load(self) -> AppSettings:

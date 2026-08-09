@@ -1,4 +1,4 @@
 """AI Learning Copilot desktop app."""
 
-__version__ = "0.5.0b1"
-VERSION_LABEL = "0.5.0 Beta 1"
+__version__ = "0.6.0"
+VERSION_LABEL = "0.6.0"

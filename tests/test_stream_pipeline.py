@@ -632,6 +632,84 @@ def test_result_window_error_view_hides_retry_without_capture() -> None:
     app.processEvents()
 
 
+def test_float_bar_collapse_folds_height_and_streams_expand() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    window.set_source_text("hello")
+    window.append_stream_chunk("translation", "你好")
+    app.processEvents()
+    assert window._expanded
+    assert not window.text_browser.isHidden()
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_collapse_reduces_height() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    window.set_result(
+        {
+            "translation": "你好" * 20,
+            "explanation": "这是一个很长的解释" * 30,
+            "source_text": "hello",
+            "capture_id": 1,
+        }
+    )
+    app.processEvents()
+    expanded_height = window.height()
+    assert expanded_height > 100
+
+    window.toggle_expanded()
+    app.processEvents()
+    assert window._expanded is False
+    assert window.text_browser.isHidden()
+    assert window.height() < expanded_height
+    assert window.height() <= 60
+
+    window.toggle_expanded()
+    app.processEvents()
+    assert window._expanded
+    assert not window.text_browser.isHidden()
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_shows_status_when_collapsed() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.set_expanded(False)
+    window.show()
+    window.set_status("正在识别...")
+    app.processEvents()
+    assert window._expanded is False
+    assert not window.status_label.isHidden()
+    assert "正在识别" in window.status_label.text()
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_set_bar_mode_does_not_reset_expanded() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    window.set_result(
+        {"translation": "你好", "explanation": "世界", "source_text": "x", "capture_id": 1}
+    )
+    app.processEvents()
+    assert window._expanded
+    window.set_bar_mode(True)
+    assert window._expanded
+    assert not window.text_browser.isHidden()
+    window.force_close()
+    app.processEvents()
+
+
 def test_result_window_followup_stream_block() -> None:
     app = QApplication.instance() or QApplication([])
     window = ResultWindow()
@@ -650,5 +728,212 @@ def test_result_window_followup_stream_block() -> None:
     assert "因为缺少依赖。" in visible_text
     assert "思考中" not in visible_text
     assert window.followup_input.isEnabled()
+    window.force_close()
+    app.processEvents()
+
+
+def test_centered_icon_centers_asymmetric_artwork() -> None:
+    app = QApplication.instance() or QApplication([])
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+
+    from app.ui.main_window import centered_icon
+
+    pix = QPixmap(32, 32)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.fillRect(0, 0, 8, 16, QColor(255, 0, 0))
+    painter.end()
+
+    out = centered_icon(QIcon(pix), size=32).pixmap(32, 32).toImage()
+    xs = [x for y in range(32) for x in range(32) if out.pixelColor(x, y).alpha() > 0]
+    ys = [y for y in range(32) for x in range(32) if out.pixelColor(x, y).alpha() > 0]
+    assert abs((min(xs) + max(xs)) / 2 - 15.5) <= 1
+    assert abs((min(ys) + max(ys)) / 2 - 15.5) <= 1
+
+
+def test_float_bar_idle_status_empty() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.set_expanded(False)
+    assert window.status_label.text() == ""
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_expands_right_down_top_left_fixed() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    screen = app.primaryScreen().availableGeometry()
+    window.set_expanded(False)
+    window.set_home_position(200, 120)
+    app.processEvents()
+    home = window.geometry()
+    assert home.width() < 380
+
+    window.set_result(
+        {
+            "translation": "你好" * 20,
+            "explanation": "这是一个很长的解释" * 30,
+            "source_text": "hello",
+            "capture_id": 1,
+        }
+    )
+    app.processEvents()
+    grown = window.geometry()
+    assert grown.width() > home.width()
+    assert grown.height() > home.height()
+    assert grown.left() == home.left()
+    assert grown.top() == home.top()
+    assert grown.right() <= screen.right()
+    assert grown.bottom() <= screen.bottom()
+
+    window.toggle_expanded()
+    app.processEvents()
+    back = window.geometry()
+    assert (back.x(), back.y()) == (home.x(), home.y())
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_edge_clamps_without_reversing() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    screen = app.primaryScreen().availableGeometry()
+    window.set_expanded(False)
+    window.set_home_position(screen.right() - window.width() - 24, screen.bottom() - window.height() - 24)
+    app.processEvents()
+    home_top_left = (window.x(), window.y())
+
+    window.set_result(
+        {
+            "translation": "你好" * 20,
+            "explanation": "这是一个很长的解释" * 30,
+            "source_text": "hello",
+            "capture_id": 1,
+        }
+    )
+    app.processEvents()
+    grown = window.geometry()
+    assert grown.width() > 300
+    assert grown.height() > 100
+    # Top-left anchored (no edge reversal); clamped only to stay on screen.
+    assert grown.left() == min(home_top_left[0], screen.right() - grown.width() + 1)
+    assert grown.top() == min(home_top_left[1], screen.bottom() - grown.height() + 1)
+    assert grown.right() <= screen.right()
+    assert grown.bottom() <= screen.bottom()
+
+    window.toggle_expanded()
+    app.processEvents()
+    back = window.geometry()
+    assert (back.x(), back.y()) == home_top_left
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_dragging_expanded_does_not_move_home() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    window.set_expanded(False)
+    window.set_home_position(150, 100)
+    app.processEvents()
+    home = window.geometry()
+
+    window.set_result(
+        {
+            "translation": "你好",
+            "explanation": "世界",
+            "source_text": "x",
+            "capture_id": 1,
+        }
+    )
+    app.processEvents()
+    window.move(400, 300)
+    window.toggle_expanded()
+    app.processEvents()
+    back = window.geometry()
+    assert (back.x(), back.y()) == (home.x(), home.y())
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_manual_size_blocks_autofit_and_persists() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    window.set_expanded(False)
+    window.set_home_position(200, 120)
+    window.set_result(
+        {
+            "translation": "你好" * 10,
+            "explanation": "解释" * 30,
+            "source_text": "x",
+            "capture_id": 1,
+        }
+    )
+    app.processEvents()
+    auto_width = window.width()
+
+    window.set_manual_size(452, 210)
+    app.processEvents()
+    assert (window.width(), window.height()) == (452, 210)
+    assert window._manual_size == (452, 210)
+
+    window.append_stream_chunk("explanation", "更多内容" * 50)
+    app.processEvents()
+    assert (window.width(), window.height()) == (452, 210)
+
+    window.toggle_expanded()
+    app.processEvents()
+    assert window.width() == 170
+    window.toggle_expanded()
+    app.processEvents()
+    assert (window.width(), window.height()) == (452, 210)
+    window.force_close()
+    app.processEvents()
+
+
+def test_float_bar_manual_resize_drag_and_reset() -> None:
+    from PySide6.QtCore import QPoint
+
+    app = QApplication.instance() or QApplication([])
+    window = ResultWindow()
+    window.set_bar_mode(True)
+    window.show()
+    window.set_expanded(False)
+    window.set_home_position(200, 120)
+    window.set_result(
+        {
+            "translation": "你好" * 10,
+            "explanation": "解释" * 30,
+            "source_text": "x",
+            "capture_id": 1,
+        }
+    )
+    app.processEvents()
+    start = window.geometry()
+
+    edge = window._hit_resize_edge(QPoint(window.width() - 1, window.height() - 1))
+    assert edge == "bottom-right"
+    window._start_resize(edge, QPoint(500, 500))
+    window._apply_resize(QPoint(560, 540))
+    window._finish_resize()
+    app.processEvents()
+    assert (window.width(), window.height()) == (start.width() + 60, start.height() + 40)
+
+    window.reset_size()
+    app.processEvents()
+    assert window._manual_size is None
+    window.append_stream_chunk("explanation", "更多" * 40)
+    app.processEvents()
+    assert window._manual_size is None
     window.force_close()
     app.processEvents()

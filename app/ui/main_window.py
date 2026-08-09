@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QThread, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QIcon, QPixmap
+from PySide6.QtGui import QAction, QCloseEvent, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -79,6 +79,49 @@ from app.ui.workers import CaptureStreamWorker, FollowupWorker
 TERMS_PAGE_SIZE = 20
 
 
+def centered_icon(icon: QIcon, size: int = 256) -> QIcon:
+    """Crop empty padding from an icon's artwork and center it in the canvas.
+
+    Fixes icons whose glyph is top-left aligned with transparent margins
+    (e.g. ``assets/icon.ico``) so the artwork fills the frame everywhere it
+    is used (window, tray, floating-bar capture button).
+    """
+    available = sorted((s.width() for s in icon.availableSizes()), reverse=True)
+    source_size = available[0] if available else size
+    source = icon.pixmap(source_size, source_size)
+    if source.isNull():
+        return icon
+    image = source.toImage()
+    min_x = min_y = max_x = max_y = None
+    for y in range(image.height()):
+        for x in range(image.width()):
+            if image.pixelColor(x, y).alpha() > 0:
+                if min_x is None or x < min_x:
+                    min_x = x
+                if max_x is None or x > max_x:
+                    max_x = x
+                if min_y is None or y < min_y:
+                    min_y = y
+                if max_y is None or y > max_y:
+                    max_y = y
+    if min_x is None:
+        return icon
+    glyph = source.copy(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
+    scaled = glyph.scaled(
+        size,
+        size,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    canvas = QPixmap(size, size)
+    canvas.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    painter.drawPixmap((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+    painter.end()
+    return QIcon(canvas)
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -91,6 +134,7 @@ class MainWindow(QMainWindow):
         self.tray: QSystemTrayIcon | None = None
         self._capturing: bool = False
         self._was_visible_before_capture: bool | None = None
+        self._result_visible_before_capture: bool = False
         self.capture_worker: CaptureStreamWorker | None = None
         self.followup_worker: FollowupWorker | None = None
         self._history_records: list[CaptureRecord] = []
@@ -109,6 +153,13 @@ class MainWindow(QMainWindow):
         self.result_window.request_retry.connect(self.retry_explain)
         self.result_window.open_history.connect(self.show_overview)
         self.result_window.font_size_changed.connect(self._save_result_font_size)
+        self.result_window.request_capture.connect(self.start_capture)
+        self.result_window.position_changed.connect(self._save_bar_position)
+        self.result_window.set_capture_icon(self._app_icon())
+        self.result_window.size_changed.connect(self._save_bar_size)
+        self.result_window.size_reset.connect(self._clear_bar_size)
+        if self.settings.bar_w is not None and self.settings.bar_h is not None:
+            self.result_window.set_manual_size(self.settings.bar_w, self.settings.bar_h)
 
         self.setWindowTitle("AI Learning Copilot")
         self.resize(855, 550)
@@ -123,14 +174,17 @@ class MainWindow(QMainWindow):
         self.refresh_terms()
         self._refresh_sidebar_stats()
         self.refresh_ocr_status()
+        self._show_float_bar()
 
     def start_capture(self) -> None:
         if self._capturing:
             return
         self._capturing = True
         self._was_visible_before_capture = self.isVisible()
+        self._result_visible_before_capture = self.result_window.isVisible()
         self.status_label.setText("准备截图，右键或 Esc 可取消。")
         self.hide()
+        self.result_window.hide()
         QTimer.singleShot(200, self._run_capture)
 
     def _restore_window_after_capture(self) -> None:
@@ -139,6 +193,65 @@ class MainWindow(QMainWindow):
         if self._was_visible_before_capture:
             self.show_normal()
         self._was_visible_before_capture = None
+        if (
+            self.settings.show_float_bar
+            and self._result_visible_before_capture
+            and not self.result_window.isVisible()
+        ):
+            self._show_float_bar()
+        self._result_visible_before_capture = False
+
+    def _show_float_bar(self) -> None:
+        if not self.settings.show_float_bar:
+            return
+        self.result_window.set_bar_mode(True)
+        self.result_window.set_expanded(False)
+        screen = QApplication.primaryScreen()
+        if self.settings.bar_x is not None and self.settings.bar_y is not None:
+            x, y = self.settings.bar_x, self.settings.bar_y
+        else:
+            if screen is None:
+                x, y = self.result_window.x(), self.result_window.y()
+            else:
+                geo = screen.availableGeometry()
+                x = geo.right() - self.result_window.width() - 24
+                y = geo.top() + 24
+        if screen is not None:
+            geo = screen.availableGeometry()
+            x = max(geo.left(), min(int(x), geo.right() - self.result_window.width() + 1))
+            y = max(geo.top(), min(int(y), geo.bottom() - self.result_window.height() + 1))
+        self.result_window.set_home_position(x, y)
+        self.result_window.show()
+        self.result_window.raise_()
+
+    def _save_bar_position(self, x: int, y: int) -> None:
+        if not self.settings.show_float_bar:
+            return
+        self.settings.bar_x = int(x)
+        self.settings.bar_y = int(y)
+        self.history_store.set_setting("bar_x", str(self.settings.bar_x))
+        self.history_store.set_setting("bar_y", str(self.settings.bar_y))
+
+    def _save_bar_size(self, width: int, height: int) -> None:
+        if not self.settings.show_float_bar:
+            return
+        self.settings.bar_w = int(width)
+        self.settings.bar_h = int(height)
+        self.history_store.set_setting("bar_w", str(self.settings.bar_w))
+        self.history_store.set_setting("bar_h", str(self.settings.bar_h))
+
+    def _clear_bar_size(self) -> None:
+        self.settings.bar_w = None
+        self.settings.bar_h = None
+        self.history_store.set_setting("bar_w", "")
+        self.history_store.set_setting("bar_h", "")
+
+    def _apply_float_bar_setting(self) -> None:
+        if self.settings.show_float_bar:
+            self._show_float_bar()
+        else:
+            self.result_window.set_bar_mode(False)
+            self.result_window.hide()
 
     def _run_capture(self) -> None:
         class CaptureThread(QThread):
@@ -405,10 +518,16 @@ class MainWindow(QMainWindow):
             model=self.model_input.text().strip(),
             hotkey=self.hotkey_input.text().strip(),
             save_screenshots=self.save_screenshots_checkbox.isChecked(),
+            show_float_bar=self.show_float_bar_checkbox.isChecked(),
             context_block=self.settings.context_block,
             current_context_id=self.settings.current_context_id,
+            bar_x=self.settings.bar_x,
+            bar_y=self.settings.bar_y,
+            bar_w=self.settings.bar_w,
+            bar_h=self.settings.bar_h,
         )
         self.settings_service.save(self.settings)
+        self._apply_float_bar_setting()
         self._start_hotkey()
         self.refresh_ocr_status()
         self.status_label.setText("设置已保存。")
@@ -1156,6 +1275,17 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(hotkey_card)
 
+        self.show_float_bar_checkbox = QCheckBox("")
+        self.show_float_bar_checkbox.setChecked(self.settings.show_float_bar)
+        float_bar_card = _settings_card(
+            "浮动截图条",
+            [
+                ("显示浮动条", self.show_float_bar_checkbox),
+            ],
+            "开启后屏幕角落常驻一条小工具条（截图 / 展开收起 / 拖动）。关闭后恢复为截图后光标处弹窗。",
+        )
+        layout.addWidget(float_bar_card)
+
         layout.addStretch()
 
         footer = QHBoxLayout()
@@ -1367,8 +1497,8 @@ class MainWindow(QMainWindow):
             base = PROJECT_DIR
         icon_path = base / "assets" / "icon.ico"
         if icon_path.exists():
-            return QIcon(str(icon_path))
-        return self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+            return centered_icon(QIcon(str(icon_path)))
+        return centered_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon))
 
     def _build_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -1666,6 +1796,9 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     def _shutdown(self) -> None:
+        if self.settings.show_float_bar and self.result_window.isVisible():
+            x, y = self.result_window.home_position()
+            self._save_bar_position(x, y)
         if self.result_window is not None:
             self.result_window.force_close()
         if self.hotkey_manager is not None:

@@ -47,6 +47,7 @@ coverage.xml
 app/data/app.db
 app/data/app.db*
 app/data/app.lock
+app/data/credentials.bin
 app/data/backups/
 app/data/screenshots/*
 !app/data/screenshots/.gitkeep

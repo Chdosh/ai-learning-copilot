@@ -690,7 +690,7 @@ class OverviewPage(QWidget):
         record = self.history_store.get_capture(capture_id)
         if record is None:
             return
-        if self._followup_worker and self._followup_worker.isRunning():
+        if self._followup_is_running():
             return
 
         for row in range(self.session_list.count()):
@@ -926,7 +926,7 @@ class OverviewPage(QWidget):
         question = self.followup_input.text().strip()
         if not question:
             return
-        if self._followup_worker and self._followup_worker.isRunning():
+        if self._followup_is_running():
             return
         self._followup_stream = {"question": question, "translation": "", "explanation": ""}
         self.followup_input.clear()
@@ -944,8 +944,24 @@ class OverviewPage(QWidget):
         )
         self._followup_worker.stream_chunk.connect(self._on_followup_chunk)
         self._followup_worker.completed.connect(self._on_followup_done)
+        self._followup_worker.finished.connect(self._clear_followup_worker)
         self._followup_worker.finished.connect(self._followup_worker.deleteLater)
         self._followup_worker.start()
+
+    def _followup_is_running(self) -> bool:
+        worker = self._followup_worker
+        if worker is None:
+            return False
+        try:
+            return worker.isRunning()
+        except RuntimeError:
+            self._followup_worker = None
+            return False
+
+    def _clear_followup_worker(self) -> None:
+        finished_worker = self.sender()
+        if self._followup_worker is finished_worker:
+            self._followup_worker = None
 
     def _on_followup_chunk(self, section: str, chunk: str) -> None:
         if section in self._followup_stream:
