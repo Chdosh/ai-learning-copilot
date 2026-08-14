@@ -87,12 +87,12 @@ def test_history_store_toggle_favorite():
         term = store.list_terms()[0]
         assert term.favorite is False
 
-        new_state = store.toggle_term_favorite(term_id)
+        new_state = store._toggle_term_favorite(term_id)
         assert new_state is True
         term = store.list_terms()[0]
         assert term.favorite is True
 
-        new_state = store.toggle_term_favorite(term_id)
+        new_state = store._toggle_term_favorite(term_id)
         assert new_state is False
 
 

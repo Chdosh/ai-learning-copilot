@@ -37,11 +37,11 @@ def test_same_term_across_captures_keeps_all_source_links(tmp_path: Path) -> Non
     c1 = store.save_capture(image_path="/t1.png", source_text="use vector", translation="a", explanation="e")
     c2 = store.save_capture(image_path="/t2.png", source_text="vector again", translation="b", explanation="e")
 
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c2)
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c2)
 
     term = store.list_terms()[0]
-    sources = store.list_term_captures(term.id)
+    sources = store._list_term_captures(term.id)
     assert {capture.id for capture in sources} == {c1, c2}
     assert term.occurrences == 2
 
@@ -50,19 +50,19 @@ def test_retry_same_capture_does_not_inflate_sources_or_occurrences(tmp_path: Pa
     store = _store(tmp_path)
     c1 = store.save_capture(image_path="/t1.png", source_text="use vector", translation="a", explanation="e")
 
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
 
     term = store.list_terms()[0]
-    sources = store.list_term_captures(term.id)
+    sources = store._list_term_captures(term.id)
     assert [capture.id for capture in sources] == [c1]
     assert term.occurrences == 1
 
 
 def test_upsert_without_capture_keeps_legacy_occurrence_counting(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程")
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程")
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程")
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程")
     term = store.list_terms()[0]
     assert term.occurrences == 2
 
@@ -72,8 +72,8 @@ def test_new_source_link_increments_occurrence_exactly_once(tmp_path: Path) -> N
     c1 = store.save_capture(image_path="/t1.png", source_text="a", translation="b", explanation="e")
     c2 = store.save_capture(image_path="/t2.png", source_text="c", translation="d", explanation="e")
 
-    store.upsert_terms([{"term": "SQL", "chinese_name": "结构化查询语言"}], domain="数据库", capture_id=c1)
-    store.upsert_terms([{"term": "SQL", "chinese_name": "结构化查询语言"}], domain="数据库", capture_id=c2)
+    store._upsert_terms([{"term": "SQL", "chinese_name": "结构化查询语言"}], domain="数据库", capture_id=c1)
+    store._upsert_terms([{"term": "SQL", "chinese_name": "结构化查询语言"}], domain="数据库", capture_id=c2)
 
     term = store.list_terms()[0]
     assert term.occurrences == 2
@@ -124,12 +124,12 @@ def test_update_capture_does_not_overwrite_context_id(tmp_path: Path) -> None:
     assert row["context_id"] == context_id
 
 
-def test_review_term_writes_exactly_one_review_event(tmp_path: Path) -> None:
+def test__review_term_writes_exactly_one_review_event(tmp_path: Path) -> None:
     store = _store(tmp_path)
     term_id = store.save_term(term="SVD", chinese_name="奇异值分解", domain="AI概念")
-    store.toggle_term_favorite(term_id)
+    store._toggle_term_favorite(term_id)
 
-    store.review_term(term_id, grade=2)
+    store._review_term(term_id, grade=2)
 
     with store._connect() as conn:
         rows = conn.execute("SELECT * FROM review_events WHERE term_id = ?", (term_id,)).fetchall()
@@ -143,7 +143,7 @@ def test_review_term_writes_exactly_one_review_event(tmp_path: Path) -> None:
 def test_review_event_and_srs_snapshot_are_atomic(tmp_path: Path) -> None:
     store = _store(tmp_path)
     term_id = store.save_term(term="SVD", chinese_name="奇异值分解", domain="AI概念")
-    store.toggle_term_favorite(term_id)
+    store._toggle_term_favorite(term_id)
 
     before = store.list_terms()[0]
     try:
@@ -176,8 +176,8 @@ def test_review_event_and_srs_snapshot_are_atomic(tmp_path: Path) -> None:
 def test_delete_term_cleans_review_events(tmp_path: Path) -> None:
     store = _store(tmp_path)
     term_id = store.save_term(term="SVD", chinese_name="奇异值分解")
-    store.toggle_term_favorite(term_id)
-    store.review_term(term_id, grade=1)
+    store._toggle_term_favorite(term_id)
+    store._review_term(term_id, grade=1)
     store.delete_term(term_id)
     with store._connect() as conn:
         count = conn.execute("SELECT COUNT(*) FROM review_events WHERE term_id = ?", (term_id,)).fetchone()[0]
@@ -188,13 +188,13 @@ def test_delete_capture_keeps_terms_with_remaining_sources(tmp_path: Path) -> No
     store = _store(tmp_path)
     c1 = store.save_capture(image_path="/t1.png", source_text="vector", translation="a", explanation="e")
     c2 = store.save_capture(image_path="/t2.png", source_text="vector", translation="b", explanation="e")
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
-    store.upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c2)
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c1)
+    store._upsert_terms([{"term": "vector", "chinese_name": "向量"}], domain="编程", capture_id=c2)
 
     store.delete_capture(c1)
 
     term = store.list_terms()[0]
-    sources = store.list_term_captures(term.id)
+    sources = store._list_term_captures(term.id)
     assert [capture.id for capture in sources] == [c2]
     assert term.occurrences == 2  # 事实已发生，不因来源删除重算快照
 

@@ -550,7 +550,7 @@ class HistoryStore:
             row = conn.execute("SELECT * FROM captures WHERE id = ?", (capture_id,)).fetchone()
         return _capture_from_row(row) if row else None
 
-    def upsert_terms(
+    def _upsert_terms(
         self,
         terms: list[dict[str, Any]],
         domain: str = "通用",
@@ -580,7 +580,7 @@ class HistoryStore:
         """Shared knowledge ingest core; returns ``(term_ids, new_source_links)``.
 
         Internal seam used by :class:`app.services.knowledge_base.KnowledgeBase`;
-        see ``upsert_terms`` for the merge semantics.
+        see ``_upsert_terms`` for the merge semantics.
         """
         if not terms:
             return [], 0
@@ -752,7 +752,7 @@ class HistoryStore:
             conn.execute("DELETE FROM term_captures WHERE term_id = ?", (term_id,))
             conn.execute("DELETE FROM terms WHERE id = ?", (term_id,))
 
-    def toggle_term_favorite(self, term_id: int) -> bool:
+    def _toggle_term_favorite(self, term_id: int) -> bool:
         """Flip favorite; favoriting schedules the term into the review queue."""
         row = self.get_term(term_id)
         if row is None:
@@ -775,12 +775,12 @@ class HistoryStore:
                     (term_id,),
                 )
 
-    def record_term_view(self, term_id: int) -> None:
+    def _record_term_view(self, term_id: int) -> None:
         """Bump the view counter — a behavior signal used to un-fold basic terms."""
         with self._connect() as conn:
             conn.execute("UPDATE terms SET views = views + 1 WHERE id = ?", (term_id,))
 
-    def review_term(self, term_id: int, grade: int) -> dict[str, object] | None:
+    def _review_term(self, term_id: int, grade: int) -> dict[str, object] | None:
         """Apply a simplified SM-2 update (0 = forgot, 1 = fuzzy, 2 = remembered)."""
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM terms WHERE id = ?", (term_id,)).fetchone()
@@ -838,7 +838,7 @@ class HistoryStore:
             "lapses": lapses,
         }
 
-    def list_due_terms(self, limit: int = 50) -> list[TermRecord]:
+    def _list_due_terms(self, limit: int = 50) -> list[TermRecord]:
         now = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
             rows = conn.execute(
@@ -852,7 +852,7 @@ class HistoryStore:
             ).fetchall()
         return [_term_from_row(row) for row in rows]
 
-    def count_due_terms(self) -> int:
+    def _count_due_terms(self) -> int:
         now = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
             row = conn.execute(
@@ -864,7 +864,7 @@ class HistoryStore:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def list_term_captures(self, term_id: int, limit: int = 30) -> list[CaptureRecord]:
+    def _list_term_captures(self, term_id: int, limit: int = 30) -> list[CaptureRecord]:
         """Captures where this term appeared — the term's origin contexts."""
         with self._connect() as conn:
             rows = conn.execute(
@@ -879,7 +879,7 @@ class HistoryStore:
             ).fetchall()
         return [_capture_from_row(row) for row in rows]
 
-    def save_learning_tip(
+    def _save_learning_tip(
         self,
         capture_id: int,
         content: str,
@@ -936,7 +936,7 @@ class HistoryStore:
             )
             return int(cursor.lastrowid or 0)
 
-    def list_learning_tips(
+    def _list_learning_tips(
         self,
         status: str = "pending",
         domain: str = "",
@@ -963,7 +963,7 @@ class HistoryStore:
             ).fetchall()
         return [_tip_from_row(row) for row in rows]
 
-    def set_learning_tip_status(self, tip_id: int, status: str) -> bool:
+    def _set_learning_tip_status(self, tip_id: int, status: str) -> bool:
         done_at = (
             datetime.now().isoformat(timespec="seconds")
             if status in ("done", "ignored")
@@ -976,12 +976,12 @@ class HistoryStore:
             )
             return cursor.rowcount > 0
 
-    def get_learning_tip(self, tip_id: int) -> LearningTip | None:
+    def _get_learning_tip(self, tip_id: int) -> LearningTip | None:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM learning_tips WHERE id = ?", (tip_id,)).fetchone()
         return _tip_from_row(row) if row else None
 
-    def count_learning_tips(self, status: str = "pending") -> int:
+    def _count_learning_tips(self, status: str = "pending") -> int:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT COUNT(*) FROM learning_tips WHERE status = ?",

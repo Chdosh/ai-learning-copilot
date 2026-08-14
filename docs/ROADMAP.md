@@ -50,6 +50,11 @@
 - [x] 截图方向识别：领域/场景画像 + 与当前学习方向冲突时轻提示
 - [x] 背景摘要手动沉淀：AI 合并最近内容 + 预览确认，绝不静默改写
 - [x] 术语 per-term 领域字段，解释口径跟随学习方向（prompt 层）
+- [x] 知识脊柱：个人知识库的前置 Gate（设计见 docs/knowledge_spine_design.md）
+  - 修复跨 capture 术语回链缺失与同 capture 重试幂等
+  - 新增 captures.context_id 方向事实、review_events 复习事实（与 SRS 原子提交）
+  - 新建 KnowledgeBase 统一外部 interface，UI/worker 不再直接写知识表
+  - 完成后个人知识库按 P1 视图 → P2 生命周期与成长 → P3 关联与方向反馈推进
 - [ ] 首次启动引导、配置诊断、更清晰的错误提示
 - [ ] 发布包自动构建、SHA-256 校验、升级迁移检查、可选自动更新
 - [ ] embedding 语义搜索与历史知识关联（保持本地优先）

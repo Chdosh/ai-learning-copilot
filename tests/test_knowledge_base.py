@@ -13,7 +13,7 @@ def _store(tmp_path: Path) -> HistoryStore:
 
 def test_pure_stopword_skipped_in_upsert(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    ids = store.upsert_terms(
+    ids = store._upsert_terms(
         [
             {"term": "the", "chinese_name": "这"},
             {"term": "因为", "chinese_name": "because"},
@@ -28,7 +28,7 @@ def test_pure_stopword_skipped_in_upsert(tmp_path: Path) -> None:
 
 def test_upsert_increments_occurrences(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.upsert_terms(
+    store._upsert_terms(
         [
             {
                 "term": "SQL",
@@ -39,7 +39,7 @@ def test_upsert_increments_occurrences(tmp_path: Path) -> None:
         ],
         domain="数据库",
     )
-    store.upsert_terms(
+    store._upsert_terms(
         [{"term": "SQL", "chinese_name": "", "beginner_explanation": "", "examples": []}],
         domain="数据库",
     )
@@ -53,11 +53,11 @@ def test_upsert_increments_occurrences(tmp_path: Path) -> None:
 
 def test_upsert_fill_blanks_first(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.upsert_terms(
+    store._upsert_terms(
         [{"term": "ORM", "chinese_name": "", "beginner_explanation": "", "examples": []}],
         domain="数据库",
     )
-    store.upsert_terms(
+    store._upsert_terms(
         [
             {
                 "term": "ORM",
@@ -75,7 +75,7 @@ def test_upsert_fill_blanks_first(tmp_path: Path) -> None:
 
 def test_user_edited_terms_not_overwritten_by_ai(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.upsert_terms(
+    store._upsert_terms(
         [{"term": "API", "chinese_name": "接口", "beginner_explanation": "旧解释", "examples": []}],
         domain="编程",
     )
@@ -86,7 +86,7 @@ def test_user_edited_terms_not_overwritten_by_ai(tmp_path: Path) -> None:
         examples=[],
         domain="编程",
     )
-    store.upsert_terms(
+    store._upsert_terms(
         [{"term": "API", "chinese_name": "新接口", "beginner_explanation": "AI 新解释", "examples": []}],
         domain="编程",
     )
@@ -104,13 +104,13 @@ def test_upsert_backlinks_term_to_capture(tmp_path: Path) -> None:
         translation="使用变换器模型",
         explanation="解释",
     )
-    store.upsert_terms(
+    store._upsert_terms(
         [{"term": "transformer", "chinese_name": "变换器"}],
         domain="AI概念",
         capture_id=capture_id,
     )
     term = store.list_terms()[0]
-    captures = store.list_term_captures(term.id)
+    captures = store._list_term_captures(term.id)
     assert [capture.id for capture in captures] == [capture_id]
 
 
@@ -122,14 +122,14 @@ def test_term_captures_cleaned_on_delete(tmp_path: Path) -> None:
         translation="测试",
         explanation="解释",
     )
-    store.upsert_terms(
+    store._upsert_terms(
         [{"term": "test", "chinese_name": "测试"}],
         domain="编程",
         capture_id=capture_id,
     )
     term = store.list_terms()[0]
     store.delete_capture(capture_id)
-    assert store.list_term_captures(term.id) == []
+    assert store._list_term_captures(term.id) == []
 
 
 def test_classify_difficulty() -> None:
@@ -143,7 +143,7 @@ def test_classify_difficulty() -> None:
 
 def test_exclude_basic_folds_unviewed_terms(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.upsert_terms(
+    store._upsert_terms(
         [
             {"term": "if", "chinese_name": "如果"},
             {"term": "Polymorphism", "chinese_name": "多态"},
@@ -156,7 +156,7 @@ def test_exclude_basic_folds_unviewed_terms(tmp_path: Path) -> None:
     assert len(all_terms) == 2
     # 有查看行为后不再折叠
     hidden = [term for term in all_terms if term.term == "if"][0]
-    store.record_term_view(hidden.id)
+    store._record_term_view(hidden.id)
     visible = store.list_terms(exclude_basic=True)
     assert {term.term for term in visible} == {"Polymorphism", "if"}
 
@@ -164,18 +164,18 @@ def test_exclude_basic_folds_unviewed_terms(tmp_path: Path) -> None:
 def test_favorite_schedules_due_and_review_sm2(tmp_path: Path) -> None:
     store = _store(tmp_path)
     term_id = store.save_term(term="SVD", chinese_name="奇异值分解")
-    assert store.count_due_terms() == 0
+    assert store._count_due_terms() == 0
 
-    assert store.toggle_term_favorite(term_id) is True
-    assert store.count_due_terms() == 1
+    assert store._toggle_term_favorite(term_id) is True
+    assert store._count_due_terms() == 1
 
-    result = store.review_term(term_id, grade=2)
+    result = store._review_term(term_id, grade=2)
     assert result is not None
     assert result["interval_days"] == 1  # 第一次答对：1 天
-    assert store.count_due_terms() == 0  # 已排期到明天
+    assert store._count_due_terms() == 0  # 已排期到明天
 
     # 忘了：重置 1 天 + lapse + ease 下降
-    store.review_term(term_id, grade=0)
+    store._review_term(term_id, grade=0)
     term = store.list_terms()[0]
     assert term.lapses == 1
     assert term.interval_days == 1
@@ -183,13 +183,13 @@ def test_favorite_schedules_due_and_review_sm2(tmp_path: Path) -> None:
 
     # 连续答对：1 → 6 → round(6 × 2.4) = 14 天
     # （第一步 ease 已到 2.5 上限，忘了后降到 2.3，再答对回到 2.4）
-    store.review_term(term_id, grade=2)
-    store.review_term(term_id, grade=2)
+    store._review_term(term_id, grade=2)
+    store._review_term(term_id, grade=2)
     term = store.list_terms()[0]
     assert term.interval_days == 14
 
-    assert store.toggle_term_favorite(term_id) is False
-    assert store.count_due_terms() == 0
+    assert store._toggle_term_favorite(term_id) is False
+    assert store._count_due_terms() == 0
 
 
 def test_learning_tips_lifecycle(tmp_path: Path) -> None:
@@ -200,21 +200,21 @@ def test_learning_tips_lifecycle(tmp_path: Path) -> None:
         translation="测试",
         explanation="解释",
     )
-    tip_id = store.save_learning_tip(
+    tip_id = store._save_learning_tip(
         capture_id=capture_id,
         content="延伸概念：正则化——防止过拟合",
         domain="AI概念",
     )
     assert tip_id > 0
-    assert store.count_learning_tips() == 1
-    tips = store.list_learning_tips(status="pending")
+    assert store._count_learning_tips() == 1
+    tips = store._list_learning_tips(status="pending")
     assert len(tips) == 1
     assert tips[0].content.startswith("延伸概念")
 
-    assert store.set_learning_tip_status(tip_id, "done") is True
-    assert store.count_learning_tips() == 0
-    assert store.count_learning_tips(status="done") == 1
-    done = store.list_learning_tips(status="done")[0]
+    assert store._set_learning_tip_status(tip_id, "done") is True
+    assert store._count_learning_tips() == 0
+    assert store._count_learning_tips(status="done") == 1
+    done = store._list_learning_tips(status="done")[0]
     assert done.done_at != ""
 
 
@@ -226,14 +226,14 @@ def test_learning_tips_cleaned_with_capture(tmp_path: Path) -> None:
         translation="测试",
         explanation="解释",
     )
-    store.save_learning_tip(capture_id=capture_id, content="一条建议")
+    store._save_learning_tip(capture_id=capture_id, content="一条建议")
     store.delete_capture(capture_id)
-    assert store.count_learning_tips() == 0
+    assert store._count_learning_tips() == 0
 
 
 def test_upsert_respects_per_term_domain(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    store.upsert_terms(
+    store._upsert_terms(
         [
             {"term": "vector", "chinese_name": "向量", "domain": "编程"},
             {"term": "vector", "chinese_name": "载体", "domain": "生物"},

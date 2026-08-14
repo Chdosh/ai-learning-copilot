@@ -40,7 +40,7 @@ def _seed_store(store: HistoryStore) -> int:
         '{"translation":"","explanation":"把长内容拆成几段。","terms":[],"tags":[]}',
         mode="custom",
     )
-    store.upsert_terms([{"term": "Token", "chinese_name": "文本单位", "beginner_explanation": "计量单位", "examples": []}])
+    store._upsert_terms([{"term": "Token", "chinese_name": "文本单位", "beginner_explanation": "计量单位", "examples": []}])
     return capture_id
 
 

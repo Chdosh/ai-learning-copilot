@@ -133,7 +133,7 @@ class KnowledgeBase:
         return self.store.get_term(term_id)
 
     def list_term_sources(self, term_id: int, limit: int = 30) -> list[CaptureRecord]:
-        return self.store.list_term_captures(term_id, limit=limit)
+        return self.store._list_term_captures(term_id, limit=limit)
 
     def save_term(self, command: SaveTermCommand) -> TermRecord:
         term_id = self.store.save_term(
@@ -160,7 +160,7 @@ class KnowledgeBase:
         return record
 
     def record_view(self, term_id: int) -> TermRecord:
-        self.store.record_term_view(term_id)
+        self.store._record_term_view(term_id)
         record = self.store.get_term(term_id)
         if record is None:
             raise RuntimeError(f"术语不存在: id={term_id}")
@@ -171,13 +171,13 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
 
     def list_due_terms(self, limit: int = 100) -> list[TermRecord]:
-        return self.store.list_due_terms(limit=limit)
+        return self.store._list_due_terms(limit=limit)
 
     def count_due_terms(self) -> int:
-        return self.store.count_due_terms()
+        return self.store._count_due_terms()
 
     def review(self, term_id: int, grade: int) -> ReviewOutcome:
-        result = self.store.review_term(term_id, grade)
+        result = self.store._review_term(term_id, grade)
         record = self.store.get_term(term_id)
         if result is None or record is None:
             raise RuntimeError(f"复习失败: 术语不存在 id={term_id}")
@@ -194,18 +194,18 @@ class KnowledgeBase:
     # ------------------------------------------------------------------
 
     def list_tips(self, query: TipQuery) -> list[LearningTip]:
-        return self.store.list_learning_tips(
+        return self.store._list_learning_tips(
             status=query.status,
             domain=query.domain,
             limit=query.limit,
         )
 
     def count_tips(self, status: str = "pending") -> int:
-        return self.store.count_learning_tips(status=status)
+        return self.store._count_learning_tips(status=status)
 
     def set_tip_status(self, tip_id: int, status: str) -> LearningTip:
-        self.store.set_learning_tip_status(tip_id, status)
-        tip = self.store.get_learning_tip(tip_id)
+        self.store._set_learning_tip_status(tip_id, status)
+        tip = self.store._get_learning_tip(tip_id)
         if tip is None:
             raise RuntimeError(f"学习建议不存在: id={tip_id}")
         return tip
