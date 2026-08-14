@@ -14,6 +14,9 @@ from app.services.settings import AppSettings
 SUMMARY_SYSTEM_PROMPT = """你是一个文本压缩助手。把用户提供的原文压缩成"背景要点"，作为解释助手理解领域的锚点。
 要求：中文输出；保留关键术语、专业名词、方法或核心结论；不要评价原文，不要复述原文结构，不要输出 Markdown。"""
 
+MERGE_SUMMARY_SYSTEM_PROMPT = """你是一个学习背景维护助手。用户会提供现有的背景要点和最近新学到的内容，请把新内容合并进现有要点，输出合并后的背景要点。
+要求：中文输出；保留关键术语、专业名词、方法与核心结论；去除过时细节；不要评价，不要输出 Markdown。"""
+
 
 class AIClientError(RuntimeError):
     pass
@@ -25,6 +28,7 @@ class TermExplanation:
     chinese_name: str = ""
     beginner_explanation: str = ""
     examples: list[str] = field(default_factory=list)
+    domain: str = ""
 
 
 @dataclass(slots=True)
@@ -196,6 +200,50 @@ class AIClient:
                 {
                     "role": "user",
                     "content": f"请把下面的内容压缩成背景要点（约 {max_chars} 字以内），保留关键术语。\n\n{source_text.strip()}",
+                },
+            ],
+            "temperature": 0.2,
+        }
+        self._disable_deepseek_thinking(payload)
+        try:
+            response = self._post_chat(payload)
+        except AIClientError:
+            return ""
+        content = self._extract_content(response).strip()
+        if "```" in content:
+            content = re.sub(
+                r"^```(?:text)?\s*|\s*```$", "", content, flags=re.MULTILINE
+            ).strip()
+        if len(content) > max_chars * 3:
+            return content[:max_chars]
+        return content
+
+    def merge_summary(
+        self,
+        existing_summary: str,
+        new_items: str,
+        max_chars: int = 400,
+    ) -> str:
+        """Merge recently learned items into a direction's background summary.
+
+        Best effort: returns an empty string on failure so the caller can keep
+        the existing summary untouched.
+        """
+        if not new_items.strip():
+            return ""
+        if not self.settings.api_key.strip():
+            return ""
+        payload = {
+            "model": self.settings.model,
+            "messages": [
+                {"role": "system", "content": MERGE_SUMMARY_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"现有背景要点：\n{existing_summary.strip() or '（空）'}\n\n"
+                        f"最近新学内容：\n{new_items.strip()}\n\n"
+                        f"请合并为不超过 {max_chars} 字的背景要点，保留关键术语，去除过时细节。"
+                    ),
                 },
             ],
             "temperature": 0.2,
@@ -398,6 +446,7 @@ def parse_ai_result(value: dict[str, Any], raw_response: dict[str, Any] | None =
                     item.get("beginner_explanation") or ""
                 ).strip(),
                 examples=[str(example).strip() for example in examples if str(example).strip()],
+                domain=str(item.get("domain") or "").strip(),
             )
         )
     tags = value.get("tags")

@@ -34,7 +34,7 @@ from app.services.context_detector import (
     detect,
     extract_keywords,
 )
-from app.services.history_store import ContextRecord, HistoryStore
+from app.services.history_store import ContextRecord, HistoryStore, LearningTip
 from app.services.settings import SettingsService
 from app.ui.theme import (
     ArrowSendButton,
@@ -50,11 +50,13 @@ from app.ui.theme import (
     PRIMARY,
     PRIMARY_DARK,
     RADIUS_LG,
+    RADIUS_MD,
     TEXT,
     TEXT_SECONDARY,
     apply_primary_button_style,
     button_qss,
 )
+from app.ui.workers import DigestWorker
 
 PRESET_DOMAINS = ["通用"] + list(DOMAIN_KEYWORDS.keys())
 PRESET_SCENES = ["通用", "其他"] + sorted(SCENE_KEYWORDS.keys())
@@ -128,6 +130,48 @@ class DirectionRepairDialog(QDialog):
         ]
 
 
+class SummaryPreviewDialog(QDialog):
+    """沉淀预览：原要点与合并后要点并排，用户确认后才写入。"""
+
+    def __init__(self, old_summary: str, new_summary: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("确认沉淀")
+        self.setMinimumSize(560, 420)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        tip = QLabel("将把以下合并后的背景要点写入当前学习方向（原内容会被替换）：")
+        tip.setWordWrap(True)
+        tip.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        layout.addWidget(tip)
+
+        old_title = QLabel("当前背景要点")
+        old_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        layout.addWidget(old_title)
+        old_box = QTextEdit()
+        old_box.setReadOnly(True)
+        old_box.setPlainText(old_summary or "（空）")
+        old_box.setMaximumHeight(84)
+        layout.addWidget(old_box)
+
+        new_title = QLabel("合并后的背景要点")
+        new_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        layout.addWidget(new_title)
+        new_box = QTextEdit()
+        new_box.setReadOnly(True)
+        new_box.setPlainText(new_summary)
+        layout.addWidget(new_box, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("应用")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class WorkbenchPage(QWidget):
     context_changed = Signal(object)
 
@@ -143,8 +187,10 @@ class WorkbenchPage(QWidget):
         self._editing_context_id: int | None = None
         self._form_open = True
         self._refreshing_direction_selector = False
+        self._digest_worker = None
         self._build_ui()
         self.refresh_directions()
+        self.refresh_tips()
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -164,6 +210,10 @@ class WorkbenchPage(QWidget):
         main_layout.setSpacing(12)
         self.direction_edit_card = self._build_direction_edit_card()
         main_layout.addWidget(self.direction_edit_card)
+        self.tips_card = self._build_tips_card()
+        main_layout.addWidget(self.tips_card)
+        self.digest_card = self._build_digest_card()
+        main_layout.addWidget(self.digest_card)
         main_layout.addStretch(1)
 
         side_panel = QWidget()
@@ -440,6 +490,197 @@ class WorkbenchPage(QWidget):
 
         layout.addWidget(self.edit_form)
         return card
+
+    # ---- 学习建议清单（自沉淀：AI 建议 → 状态流转） ----
+
+    def _build_tips_card(self) -> QFrame:
+        card = self._build_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        header.addWidget(_card_title("学习建议"))
+        header.addStretch(1)
+        self.tips_scope_combo = ChevronComboBox()
+        self.tips_scope_combo.addItem("待处理", "pending")
+        self.tips_scope_combo.addItem("已完成", "done")
+        self.tips_scope_combo.addItem("全部", "")
+        self.tips_scope_combo.setFixedWidth(88)
+        self.tips_scope_combo.setToolTip("按状态筛选建议")
+        self.tips_scope_combo.currentIndexChanged.connect(self.refresh_tips)
+        header.addWidget(self.tips_scope_combo)
+        layout.addLayout(header)
+
+        self.tips_list = QWidget()
+        self.tips_list_layout = QVBoxLayout(self.tips_list)
+        self.tips_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.tips_list_layout.setSpacing(6)
+        layout.addWidget(self.tips_list)
+        return card
+
+    def refresh_tips(self) -> None:
+        scope = "pending"
+        if hasattr(self, "tips_scope_combo"):
+            scope = str(self.tips_scope_combo.currentData() or "pending")
+        tips = self.history_store.list_learning_tips(status=scope, limit=60)
+        while self.tips_list_layout.count():
+            item = self.tips_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not tips:
+            empty = QLabel("暂无学习建议。截图解释给出的建议会自动沉淀到这里。")
+            empty.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+            empty.setWordWrap(True)
+            self.tips_list_layout.addWidget(empty)
+            return
+        for tip in tips:
+            self.tips_list_layout.addWidget(self._build_tip_row(tip))
+
+    def _build_tip_row(self, tip: LearningTip) -> QWidget:
+        row = QFrame()
+        row.setStyleSheet(
+            f"QFrame {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: {RADIUS_MD}; }}"
+        )
+        box = QVBoxLayout(row)
+        box.setContentsMargins(10, 8, 10, 8)
+        box.setSpacing(6)
+
+        content = QLabel(tip.content)
+        content.setWordWrap(True)
+        content.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        box.addWidget(content)
+
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(6)
+        meta = QLabel(f"{tip.domain or '通用'} · {tip.created_at.replace('T', ' ')[:16]}")
+        meta.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        meta_row.addWidget(meta)
+        meta_row.addStretch(1)
+        if tip.status == "pending":
+            done_button = QPushButton("完成")
+            done_button.setStyleSheet(button_qss())
+            done_button.clicked.connect(
+                lambda checked=False, t=tip.id: self._set_tip_status(t, "done")
+            )
+            ignore_button = QPushButton("忽略")
+            ignore_button.setStyleSheet(button_qss())
+            ignore_button.clicked.connect(
+                lambda checked=False, t=tip.id: self._set_tip_status(t, "ignored")
+            )
+            meta_row.addWidget(done_button)
+            meta_row.addWidget(ignore_button)
+        box.addLayout(meta_row)
+        return row
+
+    def _set_tip_status(self, tip_id: int, status: str) -> None:
+        self.history_store.set_learning_tip_status(tip_id, status)
+        self.refresh_tips()
+
+    # ---- 自沉淀：把最近内容合并进当前学习方向 ----
+
+    def _build_digest_card(self) -> QFrame:
+        card = self._build_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        layout.addWidget(_card_title("自沉淀"))
+        hint = QLabel(
+            "把最近学到的内容合并进当前学习方向的背景要点，让 AI 解释越用越懂你。"
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        layout.addWidget(hint)
+        self.digest_button = QPushButton("把最近内容沉淀进当前方向")
+        self.digest_button.setStyleSheet(button_qss())
+        self.digest_button.setToolTip("合并后需人工确认才会写入，绝不静默修改")
+        self.digest_button.clicked.connect(self._start_digest)
+        layout.addWidget(self.digest_button)
+        self.digest_status_label = QLabel("")
+        self.digest_status_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        self.digest_status_label.setWordWrap(True)
+        layout.addWidget(self.digest_status_label)
+        return card
+
+    def _digest_cursor(self, context_id: int) -> int:
+        raw = self.history_store.get_settings().get(f"digest_after_{context_id}", "")
+        return int(raw) if str(raw).strip().isdigit() else 0
+
+    def _set_digest_cursor(self, context_id: int, capture_id: int) -> None:
+        self.history_store.set_setting(f"digest_after_{context_id}", str(capture_id))
+
+    def _start_digest(self) -> None:
+        context = self._current_context()
+        if context is None:
+            QMessageBox.information(
+                self,
+                "自沉淀",
+                "请先在“自定义方向”中新建或选择一个学习方向，才能把内容沉淀进它的背景要点。",
+            )
+            return
+        domain = context.domain or "通用"
+        captures = self.history_store.search_captures_advanced(domain=domain, limit=200)
+        cursor = self._digest_cursor(context.id)
+        new_captures = sorted(
+            (capture for capture in captures if capture.id > cursor),
+            key=lambda capture: capture.id,
+        )[:15]
+        if not new_captures:
+            QMessageBox.information(self, "自沉淀", "当前方向暂无新内容可沉淀。")
+            return
+        items: list[str] = []
+        for capture in new_captures:
+            text = " ".join(
+                part for part in (capture.translation, capture.explanation) if part
+            )
+            if text.strip():
+                items.append(text.strip()[:300])
+        if not items:
+            QMessageBox.information(self, "自沉淀", "当前方向暂无新内容可沉淀。")
+            return
+        self.digest_status_label.setText(f"正在合并 {len(items)} 条新内容…")
+        self.digest_button.setEnabled(False)
+        self._digest_worker = DigestWorker(
+            existing_summary=context.summary or "",
+            new_items="\n".join(items),
+            settings=self.settings_service.load(),
+            last_capture_id=new_captures[-1].id,
+        )
+        self._digest_worker.completed.connect(self._on_digest_done)
+        self._digest_worker.finished.connect(self._digest_worker.deleteLater)
+        self._digest_worker.start()
+
+    def _on_digest_done(self, payload: dict) -> None:
+        self.digest_button.setEnabled(True)
+        if payload.get("error"):
+            self.digest_status_label.setText(str(payload["error"]))
+            return
+        merged = str(payload.get("summary") or "").strip()
+        if not merged:
+            self.digest_status_label.setText("生成失败：AI 未返回内容，背景要点未改动。")
+            return
+        context = self._current_context()
+        if context is None:
+            self.digest_status_label.setText("当前学习方向已变化，背景要点未改动。")
+            return
+        dialog = SummaryPreviewDialog(context.summary or "", merged, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.digest_status_label.setText("已取消，背景要点未改动。")
+            return
+        self.history_store.save_context(
+            name=context.name,
+            domain=context.domain or "通用",
+            scene=context.scene or "通用",
+            summary=merged,
+            instruction=context.instruction or "",
+            context_id=context.id,
+        )
+        self._set_digest_cursor(context.id, int(payload.get("last_capture_id") or 0))
+        self.digest_status_label.setText("已沉淀到当前学习方向。")
+        self.context_changed.emit(context.id)
+        self.refresh_directions()
 
     def _build_custom_combo(self, presets: list[str]) -> tuple[QVBoxLayout, QComboBox, QLineEdit]:
         row = QVBoxLayout()

@@ -15,7 +15,7 @@ from app.services.ai_client import (
     parse_json_object,
 )
 from app.services.categorizer import auto_categorize
-from app.services.context_detector import detect_domain
+from app.services.context_detector import detect_domain, detect_scene
 from app.services.history_store import HistoryStore
 from app.services.ocr import OCRError, OCRService
 from app.services.settings import AppSettings
@@ -28,6 +28,7 @@ def _term_dicts(result: AIResult) -> list[dict]:
             "chinese_name": term.chinese_name,
             "beginner_explanation": term.beginner_explanation,
             "examples": term.examples,
+            "domain": term.domain,
         }
         for term in result.terms
     ]
@@ -246,12 +247,28 @@ class CaptureStreamWorker(QThread):
             stored_image_path = ""
 
         category = auto_categorize(source_text, result.tags)
+        configured_domain = _resolve_term_domain(self.settings, self.history_store)
         domain = _resolve_capture_domain(
             self.settings,
             self.history_store,
             source_text,
             result,
         )
+        detected_domain = detect_domain(source_text)
+        detected_scene = detect_scene(source_text)
+        detected_clean = "" if detected_domain == "其他" else detected_domain
+        scene_clean = "" if detected_scene == "通用" else detected_scene
+        direction_conflict = bool(
+            configured_domain not in ("通用", "")
+            and detected_clean
+            and detected_clean != configured_domain
+        )
+        direction_hint = {
+            "detected_domain": detected_clean,
+            "detected_scene": scene_clean,
+            "current_domain": configured_domain,
+            "conflict": direction_conflict,
+        }
         if self.capture_id is not None:
             self.history_store.update_capture(
                 self.capture_id,
@@ -285,7 +302,16 @@ class CaptureStreamWorker(QThread):
         self.history_store.upsert_terms(
             term_dicts,
             domain=domain,
+            capture_id=capture_id,
         )
+        if result.learning_tip.strip():
+            self.history_store.save_learning_tip(
+                capture_id=capture_id,
+                content=result.learning_tip.strip(),
+                tip_type="followup",
+                domain=domain,
+                context_id=self.settings.current_context_id,
+            )
         if not failed and conversation_id:
             self.history_store.add_message(
                 conversation_id,
@@ -313,6 +339,7 @@ class CaptureStreamWorker(QThread):
             "tags": result.tags,
             "category": category,
             "learning_tip": result.learning_tip,
+            "direction_hint": direction_hint,
         }
 
 
@@ -425,7 +452,16 @@ class FollowupWorker(QThread):
             self.history_store.upsert_terms(
                 term_dicts,
                 domain=_resolve_term_domain(self.settings, self.history_store),
+                capture_id=self.capture_id,
             )
+            if result.learning_tip.strip() and self.capture_id:
+                self.history_store.save_learning_tip(
+                    capture_id=self.capture_id,
+                    content=result.learning_tip.strip(),
+                    tip_type="followup",
+                    domain=_resolve_term_domain(self.settings, self.history_store),
+                    context_id=self.settings.current_context_id,
+                )
 
         payload = {
             "conversation_id": self.conversation_id,
@@ -463,5 +499,36 @@ class SummaryWorker(QThread):
             self.completed.emit({"error": f"生成背景要点失败: {exc}"})
             return
         self.completed.emit({"summary": summary})
+
+
+class DigestWorker(QThread):
+    """Merge recent learning items into a direction's background summary (自沉淀)."""
+
+    completed = Signal(dict)
+
+    def __init__(
+        self,
+        existing_summary: str,
+        new_items: str,
+        settings: AppSettings,
+        last_capture_id: int = 0,
+    ) -> None:
+        super().__init__()
+        self.existing_summary = existing_summary
+        self.new_items = new_items
+        self.settings = settings
+        self.last_capture_id = last_capture_id
+
+    def run(self) -> None:
+        try:
+            summary = AIClient(self.settings).merge_summary(
+                self.existing_summary, self.new_items
+            )
+        except Exception as exc:
+            self.completed.emit({"error": f"生成背景要点失败: {exc}"})
+            return
+        self.completed.emit(
+            {"summary": summary, "last_capture_id": self.last_capture_id}
+        )
 
 
