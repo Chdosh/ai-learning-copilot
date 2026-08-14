@@ -1,5 +1,9 @@
 # 学习方向识别 × 学习建议 × 术语积累：自沉淀自学习闭环分析
 
+> 文档状态：历史分析。本文记录知识脊柱实施前的闭环问题，保留作为产品背景，不作为当前排期和实现定义。
+>
+> 当前唯一方案：[personal_knowledge_base_plan.md](personal_knowledge_base_plan.md)；已完成底座：[knowledge_spine_design.md](knowledge_spine_design.md)。
+>
 > 分析范围：学习方向的自动识别，以及"学习建议（learning_tip）+ 术语积累（terms）"两个 AI 产出物如何形成"自沉淀、自学习"闭环，实现**拓展学习思维**（发散）与**固化知识**（收敛）。
 > 姊妹篇：[terms_knowledge_base_analysis.md](terms_knowledge_base_analysis.md)（术语本/个人知识库，收敛侧）；本文档补发散侧与共享底座。
 > 依据：`app/services/context_detector.py`、`app/services/categorizer.py`、`app/services/ai_client.py`、`app/services/prompt_builder.py`、`app/ui/workers.py`、`app/ui/result_window.py`、`app/ui/workbench.py`。

@@ -54,10 +54,17 @@
   - 修复跨 capture 术语回链缺失与同 capture 重试幂等
   - 新增 captures.context_id 方向事实、review_events 复习事实（与 SRS 原子提交）
   - 新建 KnowledgeBase 统一外部 interface，UI/worker 不再直接写知识表
-  - 完成后个人知识库按 P1 视图 → P2 生命周期与成长 → P3 关联与方向反馈推进
+  - Gate 已在 `6be9561` 完成；后续以 docs/personal_knowledge_base_plan.md 为唯一方案
 - [ ] 首次启动引导、配置诊断、更清晰的错误提示
 - [ ] 发布包自动构建、SHA-256 校验、升级迁移检查、可选自动更新
-- [ ] embedding 语义搜索与历史知识关联（保持本地优先）
+
+### 个人知识库演进
+
+> 方案定义与 Gate 见 [personal_knowledge_base_plan.md](personal_knowledge_base_plan.md)，这里仅跟踪阶段状态，不重复维护另一套设计。
+
+- [ ] P1 高价值知识视图：重点 / 当前方向 / 全部，可解释分层排序；方案已审查，待实施
+- [ ] P2 学习生命周期与成长：收藏/学习语义、掌握与回炉、成长统计；实施前需单独设计审查
+- [ ] P3 关联、方向反馈与语义能力：先结构化来源与共现，证据不足时再接 embedding
 
 ### 1.0
 
