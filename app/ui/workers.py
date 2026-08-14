@@ -17,6 +17,7 @@ from app.services.ai_client import (
 from app.services.categorizer import auto_categorize
 from app.services.context_detector import detect_domain, detect_scene
 from app.services.history_store import HistoryStore
+from app.services.knowledge_base import KnowledgeBase, KnowledgeIngest
 from app.services.ocr import OCRError, OCRService
 from app.services.settings import AppSettings
 
@@ -42,6 +43,16 @@ def _resolve_term_domain(settings: AppSettings, store: HistoryStore) -> str:
         if context is not None and not context.builtin:
             return context.domain or "通用"
     return "通用"
+
+
+def _resolve_custom_context_id(settings: AppSettings, store: HistoryStore) -> int | None:
+    """The custom learning direction the user actually selected; None for builtin."""
+    context_id = getattr(settings, "current_context_id", None)
+    if context_id is not None:
+        context = store.get_context(context_id)
+        if context is not None and not context.builtin:
+            return context.id
+    return None
 
 
 def _resolve_capture_domain(
@@ -291,6 +302,7 @@ class CaptureStreamWorker(QThread):
                 tags=result.tags,
                 category=category,
                 domain=domain,
+                context_id=_resolve_custom_context_id(self.settings, self.history_store),
             )
             conversation_id = self.history_store.create_conversation(
                 capture_id=capture_id,
@@ -299,19 +311,16 @@ class CaptureStreamWorker(QThread):
             self.history_store.add_message(
                 conversation_id, "user", source_text, mode="capture"
             )
-        self.history_store.upsert_terms(
-            term_dicts,
-            domain=domain,
-            capture_id=capture_id,
-        )
-        if result.learning_tip.strip():
-            self.history_store.save_learning_tip(
+        KnowledgeBase(self.history_store).ingest(
+            KnowledgeIngest(
                 capture_id=capture_id,
-                content=result.learning_tip.strip(),
+                terms=term_dicts,
+                learning_tip=result.learning_tip,
                 tip_type="followup",
                 domain=domain,
-                context_id=self.settings.current_context_id,
+                context_id=_resolve_custom_context_id(self.settings, self.history_store),
             )
+        )
         if not failed and conversation_id:
             self.history_store.add_message(
                 conversation_id,
@@ -449,19 +458,17 @@ class FollowupWorker(QThread):
                 ),
                 mode=self.mode,
             )
-            self.history_store.upsert_terms(
-                term_dicts,
-                domain=_resolve_term_domain(self.settings, self.history_store),
-                capture_id=self.capture_id,
-            )
-            if result.learning_tip.strip() and self.capture_id:
-                self.history_store.save_learning_tip(
+            term_domain = _resolve_term_domain(self.settings, self.history_store)
+            KnowledgeBase(self.history_store).ingest(
+                KnowledgeIngest(
                     capture_id=self.capture_id,
-                    content=result.learning_tip.strip(),
+                    terms=term_dicts,
+                    learning_tip=result.learning_tip,
                     tip_type="followup",
-                    domain=_resolve_term_domain(self.settings, self.history_store),
-                    context_id=self.settings.current_context_id,
+                    domain=term_domain,
+                    context_id=_resolve_custom_context_id(self.settings, self.history_store),
                 )
+            )
 
         payload = {
             "conversation_id": self.conversation_id,
