@@ -95,7 +95,7 @@ def test_query_contract_defaults() -> None:
 
 def test_query_terms_returns_term_page(tmp_path: Path) -> None:
     kb = _kb(tmp_path)
-    _ingest_term(kb, "Vector", domain="编程")
+    _ingest_term(kb, "Vector", domain="编程", capture_id=_capture(kb))
     page = kb.query_terms(TermQuery())
     assert isinstance(page, TermPage)
     assert len(page.items) == 1

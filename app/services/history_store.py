@@ -75,6 +75,18 @@ class ConversationMessage:
 
 
 @dataclass(slots=True)
+class TermAggregate:
+    """术语视图的原始聚合事实：SQLite adapter 输出，规则判断留在 KnowledgeBase。"""
+
+    term: TermRecord
+    source_count: int
+    latest_source_at: str
+    exact_count: int
+    other_count: int
+    null_count: int
+
+
+@dataclass(slots=True)
 class ContextRecord:
     id: int
     name: str
@@ -1144,6 +1156,130 @@ class HistoryStore:
             params.extend([like, like, like])
         if exclude_basic and not query:
             where.append("NOT (difficulty = 'basic' AND favorite = 0 AND views = 0)")
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT domain, COUNT(*) AS n FROM terms
+                {where_sql}
+                GROUP BY domain ORDER BY n DESC, domain
+                """,
+                params,
+            ).fetchall()
+        return [(str(row[0]), int(row[1])) for row in rows]
+
+    # ------------------------------------------------------------------
+    # 术语视图聚合查询（知识库 P1：SQLite adapter，规则由 KnowledgeBase 持有）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_term_view_filter(
+        search: str,
+        domain: str,
+        fold_basic: bool,
+        scope_current_direction: bool,
+        context_param: int,
+        effective_domain: str,
+    ) -> tuple[str, list]:
+        where: list[str] = []
+        params: list = []
+        if search:
+            like = f"%{search}%"
+            where.append("(t.term LIKE ? OR t.chinese_name LIKE ? OR t.beginner_explanation LIKE ?)")
+            params.extend([like, like, like])
+        if domain:
+            where.append("t.domain = ?")
+            params.append(domain)
+        if fold_basic:
+            where.append(
+                "NOT (t.difficulty = 'basic' AND t.favorite = 0 AND t.user_edited = 0 AND t.views = 0)"
+            )
+        if scope_current_direction:
+            if context_param > 0:
+                where.append(
+                    "(COALESCE(s.exact_count, 0) > 0 "
+                    "OR (COALESCE(s.other_count, 0) = 0 AND t.domain = ?))"
+                )
+                params.append(effective_domain)
+            else:
+                where.append("t.domain = ?")
+                params.append(effective_domain)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        return where_sql, params
+
+    def _fetch_term_aggregates(
+        self,
+        *,
+        search: str = "",
+        domain: str = "",
+        fold_basic: bool = False,
+        scope_current_direction: bool = False,
+        current_context_id: int | None = None,
+        effective_domain: str = "通用",
+    ) -> list[TermAggregate]:
+        context_param = current_context_id if current_context_id is not None else -1
+        where_sql, params = self._build_term_view_filter(
+            search=search,
+            domain=domain,
+            fold_basic=fold_basic,
+            scope_current_direction=scope_current_direction,
+            context_param=context_param,
+            effective_domain=effective_domain,
+        )
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT t.*,
+                       COALESCE(s.source_count, 0) AS source_count,
+                       s.latest_source_at AS latest_source_at,
+                       COALESCE(s.exact_count, 0) AS exact_count,
+                       COALESCE(s.other_count, 0) AS other_count,
+                       COALESCE(s.null_count, 0) AS null_count
+                FROM terms t
+                LEFT JOIN (
+                    SELECT tc.term_id AS term_id,
+                           COUNT(DISTINCT tc.capture_id) AS source_count,
+                           MAX(c.created_at) AS latest_source_at,
+                           SUM(CASE WHEN c.context_id = ? THEN 1 ELSE 0 END) AS exact_count,
+                           SUM(CASE WHEN c.context_id IS NOT NULL AND c.context_id != ? THEN 1 ELSE 0 END) AS other_count,
+                           SUM(CASE WHEN c.context_id IS NULL THEN 1 ELSE 0 END) AS null_count
+                    FROM term_captures tc
+                    JOIN captures c ON c.id = tc.capture_id
+                    GROUP BY tc.term_id
+                ) s ON s.term_id = t.id
+                {where_sql}
+                """,
+                (context_param, context_param, *params),
+            ).fetchall()
+        return [
+            TermAggregate(
+                term=_term_from_row(row),
+                source_count=int(row["source_count"]),
+                latest_source_at=str(row["latest_source_at"] or ""),
+                exact_count=int(row["exact_count"]),
+                other_count=int(row["other_count"]),
+                null_count=int(row["null_count"]),
+            )
+            for row in rows
+        ]
+
+    def _fetch_term_domain_counts(
+        self,
+        *,
+        search: str = "",
+        fold_basic: bool = False,
+    ) -> list[tuple[str, int]]:
+        """领域统计：应用视图折叠与搜索条件，但在领域筛选前统计。"""
+        where: list[str] = []
+        params: list = []
+        if search:
+            like = f"%{search}%"
+            where.append("(term LIKE ? OR chinese_name LIKE ? OR beginner_explanation LIKE ?)")
+            params.extend([like, like, like])
+        if fold_basic:
+            where.append(
+                "NOT (difficulty = 'basic' AND favorite = 0 AND user_edited = 0 AND views = 0)"
+            )
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as conn:
             rows = conn.execute(

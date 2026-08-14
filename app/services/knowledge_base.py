@@ -14,6 +14,7 @@ from app.services.history_store import (
     CaptureRecord,
     HistoryStore,
     LearningTip,
+    TermAggregate,
     TermRecord,
 )
 
@@ -134,11 +135,102 @@ class KnowledgeBase:
     def query_terms(self, query: TermQuery) -> TermPage:
         """一次请求返回完整术语页：列表 + 总数 + 领域统计 + 排序理由。
 
-        个人知识库 P1-A 契约；实现（聚合 SQL + 分层排序）属于 P1-B。
-        当前方向（current_direction）视图只走本接口，旧浏览方法不接受。
+        视图规则（方案 §6.4-§6.6）：
+        - ``focus`` / ``current_direction`` 折叠无显式信号的基础词，搜索时绕过；
+        - ``current_direction`` 范围：exact 来源，或全 NULL 来源 / 无来源术语按领域回退；
+        - 排序为可解释分层：显式意图 > 方向相关性 > 来源/查看证据（封顶）> term.id。
         """
         self._validate_term_query(query)
-        raise NotImplementedError("P1-B：统一聚合查询尚未实现")
+        search = query.query.strip()
+        fold_basic = query.view in ("focus", "current_direction") and not search
+        scope_current_direction = query.view == "current_direction"
+        aggregates = self.store._fetch_term_aggregates(
+            search=search,
+            domain=query.domain.strip(),
+            fold_basic=fold_basic,
+            scope_current_direction=scope_current_direction,
+            current_context_id=query.current_context_id,
+            effective_domain=query.effective_domain,
+        )
+        total = len(aggregates)
+        self._sort_aggregates(aggregates, query.effective_domain)
+        page = aggregates[query.offset : query.offset + query.limit]
+        items = [
+            TermViewItem(
+                term=aggregate.term,
+                source_count=aggregate.source_count,
+                reasons=self._build_reasons(aggregate, query.effective_domain),
+            )
+            for aggregate in page
+        ]
+        domain_counts = self.store._fetch_term_domain_counts(
+            search=search,
+            fold_basic=fold_basic,
+        )
+        return TermPage(items=items, total=total, domain_counts=domain_counts)
+
+    @staticmethod
+    def _direction_level(aggregate: TermAggregate, effective_domain: str) -> int:
+        """0 = exact，1 = domain 回退，2 = 无方向证据。
+
+        domain 回退只允许「来源全为 NULL 或没有来源」的术语；已有其他
+        非空 context 来源的术语不能凭同领域冒充当前具体方向（方案 §6.5）。
+        """
+        if aggregate.exact_count > 0:
+            return 0
+        if aggregate.other_count == 0 and aggregate.term.domain == effective_domain:
+            return 1
+        return 2
+
+    @classmethod
+    def _sort_aggregates(cls, aggregates: list[TermAggregate], effective_domain: str) -> None:
+        """稳定多趟排序：从最弱键到最强键，实现分层可解释排序（方案 §6.6）。"""
+        aggregates.sort(key=lambda aggregate: aggregate.term.id)
+        aggregates.sort(
+            key=lambda aggregate: aggregate.latest_source_at,
+            reverse=True,
+        )
+        aggregates.sort(
+            key=lambda aggregate: min(aggregate.term.views, _SORT_VIEW_CAP),
+            reverse=True,
+        )
+        aggregates.sort(
+            key=lambda aggregate: min(aggregate.source_count, _SORT_SOURCE_CAP),
+            reverse=True,
+        )
+        aggregates.sort(
+            key=lambda aggregate: cls._direction_level(aggregate, effective_domain)
+        )
+        aggregates.sort(
+            key=lambda aggregate: 0
+            if (aggregate.term.favorite or aggregate.term.user_edited)
+            else 1
+        )
+
+    @staticmethod
+    def _build_reasons(aggregate: TermAggregate, effective_domain: str) -> tuple[str, ...]:
+        """最多 3 条最有解释力的理由（方案 §6.7），按意图 > 方向 > 证据排序。"""
+        term = aggregate.term
+        reasons: list[str] = []
+        if term.favorite:
+            reasons.append("用户已收藏")
+        if term.user_edited:
+            reasons.append("用户编辑过解释")
+        if aggregate.exact_count > 0:
+            reasons.append(f"当前方向出现 {aggregate.exact_count} 次")
+        elif (
+            aggregate.other_count == 0
+            and term.domain == effective_domain
+            and effective_domain != "通用"
+        ):
+            reasons.append("与当前方向同领域")
+        if aggregate.source_count > 0:
+            reasons.append(f"来自 {aggregate.source_count} 条学习记录")
+        if term.views > 0:
+            reasons.append("用户查看过")
+        if not reasons:
+            reasons.append(f"已出现 {term.occurrences} 次")
+        return tuple(reasons[:3])
 
     @staticmethod
     def _validate_term_query(query: TermQuery) -> None:
