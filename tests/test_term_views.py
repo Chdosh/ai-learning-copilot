@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from app.services.history_store import HistoryStore
 from app.services.knowledge_base import (
-    SORT_SOURCE_CAP,
-    SORT_VIEW_CAP,
+    _SORT_SOURCE_CAP,
+    _SORT_VIEW_CAP,
     KnowledgeBase,
     KnowledgeIngest,
     SaveTermCommand,
@@ -43,6 +45,14 @@ def _capture(kb: KnowledgeBase, context_id: int | None = None) -> int:
         explanation="解释",
         context_id=context_id,
     )
+
+
+def _set_capture_time(kb: KnowledgeBase, capture_id: int, created_at: str) -> None:
+    with kb.store._connect() as conn:
+        conn.execute(
+            "UPDATE captures SET created_at = ? WHERE id = ?",
+            (created_at, capture_id),
+        )
 
 
 def _ingest_term(
@@ -91,8 +101,7 @@ def test_query_terms_returns_term_page(tmp_path: Path) -> None:
     assert len(page.items) == 1
     item = page.items[0]
     assert isinstance(item, TermViewItem)
-    assert item.direction_level in ("exact", "domain", "none")
-    assert item.rank_tier in ("intent", "direction", "evidence", "base")
+    assert item.source_count == 1
     assert item.reasons
 
 
@@ -169,7 +178,7 @@ def test_favorited_sorts_above_higher_occurrence_term(tmp_path: Path) -> None:
     kb = _kb(tmp_path)
     favorited_id = _ingest_term(kb, "Vector", domain="编程")
     kb.set_favorite(favorited_id, favorite=True)
-    for _ in range(SORT_SOURCE_CAP):
+    for _ in range(_SORT_SOURCE_CAP):
         capture_id = _capture(kb)
         _ingest_term(kb, "Polymorphism", domain="编程", capture_id=capture_id)
 
@@ -190,8 +199,6 @@ def test_direction_levels_rank_exact_above_domain_above_none(tmp_path: Path) -> 
         TermQuery(view="focus", current_context_id=context_id, effective_domain="编程")
     )
     assert [item.term.term for item in page.items] == ["Polymorphism", "Vector", "HTTP"]
-    levels = {item.term.term: item.direction_level for item in page.items}
-    assert levels == {"Polymorphism": "exact", "Vector": "domain", "HTTP": "none"}
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +239,25 @@ def test_current_direction_without_context_filters_by_effective_domain(tmp_path:
     assert {item.term.term for item in page.items} == {"Polymorphism", "Vector"}
 
 
+def test_current_direction_view_allows_manual_term_without_sources(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    context_id = kb.store.save_context(name="深度学习", domain="编程", scene="通用")
+    kb.save_term(
+        SaveTermCommand(
+            term="ManualWord",
+            chinese_name="手工词",
+            domain="编程",
+        )
+    )
+
+    page = kb.query_terms(
+        TermQuery(view="current_direction", current_context_id=context_id, effective_domain="编程")
+    )
+    manual = [item for item in page.items if item.term.term == "ManualWord"]
+    assert len(manual) == 1
+    assert manual[0].source_count == 0
+
+
 # ---------------------------------------------------------------------------
 # 来源证据与封顶（方案 §4.3 / §6.6 / 验收 6.11）
 # ---------------------------------------------------------------------------
@@ -252,14 +278,36 @@ def test_source_and_view_caps_bound_ranking(tmp_path: Path) -> None:
     for _ in range(20):
         _ingest_term(kb, "Polymorphism", domain="编程", capture_id=_capture(kb))
     capped_id = 0
-    for _ in range(SORT_SOURCE_CAP + 1):
+    for _ in range(_SORT_SOURCE_CAP + 1):
         capped_id = _ingest_term(kb, "Vector", domain="编程", capture_id=_capture(kb))
-    for _ in range(SORT_VIEW_CAP + 1):
+    for _ in range(_SORT_VIEW_CAP + 1):
         kb.record_view(capped_id)
 
     page = kb.query_terms(TermQuery(view="focus"))
     order = [item.term.term for item in page.items]
     # 来源数都超过封顶后不再拉开差距，查看次数决定顺序
+    assert order[0] == "Vector"
+    assert order[1] == "Polymorphism"
+
+
+def test_view_cap_bounds_ranking_without_extra_advantage(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    old_capture = _capture(kb)
+    old_id = _ingest_term(kb, "Polymorphism", domain="编程", capture_id=old_capture)
+    for _ in range(_SORT_VIEW_CAP + 7):
+        kb.record_view(old_id)
+    _set_capture_time(kb, old_capture, "2026-01-01T00:00:00")
+
+    new_capture = _capture(kb)
+    new_id = _ingest_term(kb, "Vector", domain="编程", capture_id=new_capture)
+    for _ in range(_SORT_VIEW_CAP + 1):
+        kb.record_view(new_id)
+    _set_capture_time(kb, new_capture, "2026-02-01T00:00:00")
+
+    page = kb.query_terms(TermQuery(view="focus"))
+    order = [item.term.term for item in page.items]
+    # 若查看次数不封顶，Polymorphism(10 次) 会排在 Vector(4 次) 前；
+    # 封顶后两者打平，由最近来源时间决定。
     assert order[0] == "Vector"
     assert order[1] == "Polymorphism"
 
@@ -315,3 +363,50 @@ def test_domain_counts_ignore_domain_filter_while_items_do_not(tmp_path: Path) -
     assert page.total == 1
     counts = dict(page.domain_counts)
     assert counts == {"编程": 1, "数据库": 1}
+
+
+def test_domain_counts_apply_view_and_search_conditions(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    _ingest_basic_many_times(kb, "if", times=1)
+    _ingest_term(kb, "Vector", domain="编程")
+    _ingest_term(kb, "ORM", domain="数据库")
+
+    page = kb.query_terms(TermQuery(view="focus"))
+    assert dict(page.domain_counts) == {"编程": 1, "数据库": 1}
+
+    searched = kb.query_terms(TermQuery(view="focus", query="if"))
+    assert dict(searched.domain_counts) == {"通用": 1}
+
+
+# ---------------------------------------------------------------------------
+# 参数校验（方案 §6.3）
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_view_rejected(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    with pytest.raises(ValueError):
+        kb.query_terms(TermQuery(view="bogus"))
+
+
+def test_invalid_limit_and_offset_rejected(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    for bad_query in (
+        TermQuery(limit=0),
+        TermQuery(limit=-1),
+        TermQuery(offset=-1),
+    ):
+        with pytest.raises(ValueError):
+            kb.query_terms(bad_query)
+
+
+def test_legacy_browsing_methods_reject_current_direction(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    query = TermQuery(view="current_direction")
+    for call in (
+        lambda: kb.list_terms(query),
+        lambda: kb.count_terms(query),
+        lambda: kb.term_domain_counts(query),
+    ):
+        with pytest.raises(ValueError):
+            call()

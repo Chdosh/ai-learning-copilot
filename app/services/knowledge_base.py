@@ -50,13 +50,10 @@ class TermQuery:
 
 @dataclass(slots=True)
 class TermViewItem:
-    """术语视图项：排序依据与可解释理由随结果返回，UI 不重复推导规则。"""
+    """术语视图项：仅暴露 UI 需要的事实，排序内部状态（方向级别、分层键）不外泄。"""
 
     term: TermRecord
     source_count: int
-    current_context_source_count: int
-    direction_level: str  # exact | domain | none
-    rank_tier: str  # intent | direction | evidence | base
     reasons: tuple[str, ...]
 
 
@@ -68,8 +65,9 @@ class TermPage:
 
 
 # 排序封顶常量：高频只证明“多次出现”，不能无限放大价值（方案 §6.6）。
-SORT_SOURCE_CAP = 5
-SORT_VIEW_CAP = 3
+# 私有常量，由排序契约测试固定，不属于外部 interface。
+_SORT_SOURCE_CAP = 5
+_SORT_VIEW_CAP = 3
 
 
 @dataclass(slots=True)
@@ -137,29 +135,51 @@ class KnowledgeBase:
         """一次请求返回完整术语页：列表 + 总数 + 领域统计 + 排序理由。
 
         个人知识库 P1-A 契约；实现（聚合 SQL + 分层排序）属于 P1-B。
+        当前方向（current_direction）视图只走本接口，旧浏览方法不接受。
         """
+        self._validate_term_query(query)
         raise NotImplementedError("P1-B：统一聚合查询尚未实现")
 
+    @staticmethod
+    def _validate_term_query(query: TermQuery) -> None:
+        if query.view not in ("focus", "current_direction", "all"):
+            raise ValueError(f"未知术语视图: {query.view!r}")
+        if query.limit <= 0:
+            raise ValueError("limit 必须大于 0")
+        if query.offset < 0:
+            raise ValueError("offset 不能为负")
+
+    @staticmethod
+    def _require_browsing_view(query: TermQuery) -> None:
+        if query.view not in ("all", "focus"):
+            raise ValueError(
+                f"视图 {query.view!r} 仅支持 query_terms()，"
+                "list_terms/count_terms/term_domain_counts 只处理 all/focus"
+            )
+
     def list_terms(self, query: TermQuery) -> list[TermRecord]:
+        self._require_browsing_view(query)
         return self.store.list_terms(
             query=query.query,
             domain=query.domain,
             limit=query.limit,
             offset=query.offset,
-            exclude_basic=(query.view in ("focus", "current_direction")),
+            exclude_basic=(query.view == "focus"),
         )
 
     def count_terms(self, query: TermQuery) -> int:
+        self._require_browsing_view(query)
         return self.store.count_terms(
             query=query.query,
             domain=query.domain,
-            exclude_basic=(query.view in ("focus", "current_direction")),
+            exclude_basic=(query.view == "focus"),
         )
 
     def term_domain_counts(self, query: TermQuery) -> list[tuple[str, int]]:
+        self._require_browsing_view(query)
         return self.store.term_domain_counts(
             query=query.query,
-            exclude_basic=(query.view in ("focus", "current_direction")),
+            exclude_basic=(query.view == "focus"),
         )
 
     def get_term(self, term_id: int) -> TermRecord | None:

@@ -184,9 +184,6 @@ class TermQuery:
 class TermViewItem:
     term: TermRecord
     source_count: int
-    current_context_source_count: int
-    direction_level: str  # exact | domain | none
-    rank_tier: str
     reasons: tuple[str, ...]
 
 @dataclass(slots=True)
@@ -198,6 +195,8 @@ class TermPage:
 class KnowledgeBase:
     def query_terms(self, query: TermQuery) -> TermPage: ...
 ```
+
+方向级别、当前方向来源数和分层排序键属于 `KnowledgeBase` 实现内部，不随 `TermViewItem` 暴露；调用方通过最终顺序和 `reasons` 理解结果。
 
 这个接口负责一个完整的“刷新术语页”用例：
 
