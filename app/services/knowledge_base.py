@@ -39,11 +39,37 @@ class KnowledgeIngestResult:
 
 @dataclass(slots=True)
 class TermQuery:
-    view: str = "all"  # all | focus（focus = 折叠无行为信号的 basic 词）
+    view: str = "focus"  # focus | current_direction | all
     query: str = ""
     domain: str = ""
-    limit: int = 200
+    current_context_id: int | None = None
+    effective_domain: str = "通用"
+    limit: int = 50
     offset: int = 0
+
+
+@dataclass(slots=True)
+class TermViewItem:
+    """术语视图项：排序依据与可解释理由随结果返回，UI 不重复推导规则。"""
+
+    term: TermRecord
+    source_count: int
+    current_context_source_count: int
+    direction_level: str  # exact | domain | none
+    rank_tier: str  # intent | direction | evidence | base
+    reasons: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class TermPage:
+    items: list[TermViewItem]
+    total: int
+    domain_counts: list[tuple[str, int]]
+
+
+# 排序封顶常量：高频只证明“多次出现”，不能无限放大价值（方案 §6.6）。
+SORT_SOURCE_CAP = 5
+SORT_VIEW_CAP = 3
 
 
 @dataclass(slots=True)
@@ -107,26 +133,33 @@ class KnowledgeBase:
     # 术语查询与维护
     # ------------------------------------------------------------------
 
+    def query_terms(self, query: TermQuery) -> TermPage:
+        """一次请求返回完整术语页：列表 + 总数 + 领域统计 + 排序理由。
+
+        个人知识库 P1-A 契约；实现（聚合 SQL + 分层排序）属于 P1-B。
+        """
+        raise NotImplementedError("P1-B：统一聚合查询尚未实现")
+
     def list_terms(self, query: TermQuery) -> list[TermRecord]:
         return self.store.list_terms(
             query=query.query,
             domain=query.domain,
             limit=query.limit,
             offset=query.offset,
-            exclude_basic=(query.view == "focus"),
+            exclude_basic=(query.view in ("focus", "current_direction")),
         )
 
     def count_terms(self, query: TermQuery) -> int:
         return self.store.count_terms(
             query=query.query,
             domain=query.domain,
-            exclude_basic=(query.view == "focus"),
+            exclude_basic=(query.view in ("focus", "current_direction")),
         )
 
     def term_domain_counts(self, query: TermQuery) -> list[tuple[str, int]]:
         return self.store.term_domain_counts(
             query=query.query,
-            exclude_basic=(query.view == "focus"),
+            exclude_basic=(query.view in ("focus", "current_direction")),
         )
 
     def get_term(self, term_id: int) -> TermRecord | None:
