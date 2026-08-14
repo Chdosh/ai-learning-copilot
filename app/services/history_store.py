@@ -109,7 +109,8 @@ class HistoryStore:
                     app_name TEXT NOT NULL DEFAULT '',
                     tags TEXT NOT NULL DEFAULT '[]',
                     category TEXT NOT NULL DEFAULT '',
-                    domain TEXT NOT NULL DEFAULT '通用'
+                    domain TEXT NOT NULL DEFAULT '通用',
+                    context_id INTEGER
                 )
                 """
             )
@@ -203,6 +204,45 @@ class HistoryStore:
             self._initialize_contexts_table(conn)
             self._migrate_schema(conn)
             self._try_initialize_fts(conn)
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_term_captures_capture
+                ON term_captures(capture_id, term_id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_captures_context
+                ON captures(context_id, created_at, id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS review_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    term_id INTEGER NOT NULL,
+                    grade INTEGER NOT NULL CHECK (grade IN (0, 1, 2)),
+                    reviewed_at TEXT NOT NULL,
+                    interval_days INTEGER NOT NULL,
+                    ease REAL NOT NULL,
+                    lapses INTEGER NOT NULL,
+                    term_domain TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(term_id) REFERENCES terms(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_events_term_time
+                ON review_events(term_id, reviewed_at, id)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_review_events_time
+                ON review_events(reviewed_at, id)
+                """
+            )
 
     def _initialize_contexts_table(self, conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -322,6 +362,13 @@ class HistoryStore:
             )
         except sqlite3.Error:
             pass
+        # 知识脊柱：capture 发生时的真实学习方向（旧数据保持 NULL，不猜测回填）
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(captures)")}
+            if "context_id" not in cols:
+                conn.execute("ALTER TABLE captures ADD COLUMN context_id INTEGER")
+        except sqlite3.Error:
+            pass
 
     def save_capture(
         self,
@@ -333,14 +380,16 @@ class HistoryStore:
         tags: list[str] | None = None,
         category: str = "",
         domain: str = "通用",
+        context_id: int | None = None,
     ) -> int:
         created_at = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO captures
-                    (created_at, image_path, source_text, translation, explanation, app_name, tags, category, domain)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (created_at, image_path, source_text, translation, explanation,
+                     app_name, tags, category, domain, context_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     created_at,
@@ -352,6 +401,7 @@ class HistoryStore:
                     json.dumps(tags or [], ensure_ascii=False),
                     category,
                     domain or "通用",
+                    context_id,
                 ),
             )
             return int(cursor.lastrowid)
@@ -512,69 +562,126 @@ class HistoryStore:
         - Difficulty is classified locally (rule-based, zero API cost).
         - Fill-blanks-first: a new explanation only fills empty fields of the
           existing row; user-edited rows are never overwritten by AI output.
-        - ``occurrences`` counts every encounter (the legacy ``review_count``
-          column is kept in sync for readers that predate the rename).
+        - Occurrence facts: when ``capture_id`` is given, ``occurrences`` counts
+          distinct captures (a retry of the same capture never inflates it);
+          without a capture the legacy per-call counting is kept.
         - When ``capture_id`` is given, the term↔capture backlink is written
           so each term keeps its origin context.
         """
+        ids, _ = self._ingest_terms(terms, domain=domain, capture_id=capture_id)
+        return ids
+
+    def _ingest_terms(
+        self,
+        terms: list[dict[str, Any]],
+        domain: str = "通用",
+        capture_id: int | None = None,
+    ) -> tuple[list[int], int]:
+        """Shared knowledge ingest core; returns ``(term_ids, new_source_links)``.
+
+        Internal seam used by :class:`app.services.knowledge_base.KnowledgeBase`;
+        see ``upsert_terms`` for the merge semantics.
+        """
         if not terms:
-            return []
+            return [], 0
         now = datetime.now().isoformat(timespec="seconds")
         ids: list[int] = []
+        new_source_links = 0
         with self._connect() as conn:
             for term in terms:
                 name = str(term.get("term") or "").strip()
                 if not name or is_pure_stopword(name):
                     continue
                 term_domain = str(term.get("domain") or "").strip() or domain or "通用"
-                cursor = conn.execute(
-                    """
-                    INSERT INTO terms
-                        (term, domain, chinese_name, beginner_explanation, examples,
-                         first_seen_at, review_count, occurrences, difficulty)
-                    VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
-                    ON CONFLICT(term, domain) DO UPDATE SET
-                        chinese_name = CASE
-                            WHEN terms.user_edited = 1 THEN terms.chinese_name
-                            WHEN terms.chinese_name != '' THEN terms.chinese_name
-                            ELSE excluded.chinese_name END,
-                        beginner_explanation = CASE
-                            WHEN terms.user_edited = 1 THEN terms.beginner_explanation
-                            WHEN terms.beginner_explanation != '' THEN terms.beginner_explanation
-                            ELSE excluded.beginner_explanation END,
-                        examples = CASE
-                            WHEN terms.user_edited = 1 THEN terms.examples
-                            WHEN terms.examples != '[]' THEN terms.examples
-                            ELSE excluded.examples END,
-                        review_count = terms.review_count + 1,
-                        occurrences = terms.occurrences + 1,
-                        difficulty = CASE
-                            WHEN terms.difficulty != '' THEN terms.difficulty
-                            ELSE excluded.difficulty END
-                    """,
-                    (
-                        name,
-                        term_domain,
-                        str(term.get("chinese_name") or ""),
-                        str(term.get("beginner_explanation") or ""),
-                        json.dumps(term.get("examples") or [], ensure_ascii=False),
-                        now,
-                        classify_difficulty(name),
-                    ),
-                )
-                term_id = int(cursor.lastrowid or 0)
+                existing = conn.execute(
+                    "SELECT id FROM terms WHERE term = ? AND domain = ?",
+                    (name, term_domain),
+                ).fetchone()
+                if existing is None:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO terms
+                            (term, domain, chinese_name, beginner_explanation, examples,
+                             first_seen_at, review_count, occurrences, difficulty)
+                        VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
+                        """,
+                        (
+                            name,
+                            term_domain,
+                            str(term.get("chinese_name") or ""),
+                            str(term.get("beginner_explanation") or ""),
+                            json.dumps(term.get("examples") or [], ensure_ascii=False),
+                            now,
+                            classify_difficulty(name),
+                        ),
+                    )
+                    term_id = int(cursor.lastrowid or 0)
+                else:
+                    term_id = int(existing["id"])
+                    conn.execute(
+                        """
+                        UPDATE terms SET
+                            chinese_name = CASE
+                                WHEN user_edited = 1 THEN chinese_name
+                                WHEN chinese_name != '' THEN chinese_name
+                                ELSE ? END,
+                            beginner_explanation = CASE
+                                WHEN user_edited = 1 THEN beginner_explanation
+                                WHEN beginner_explanation != '' THEN beginner_explanation
+                                ELSE ? END,
+                            examples = CASE
+                                WHEN user_edited = 1 THEN examples
+                                WHEN examples != '[]' THEN examples
+                                ELSE ? END,
+                            difficulty = CASE
+                                WHEN difficulty != '' THEN difficulty
+                                ELSE ? END
+                        WHERE id = ?
+                        """,
+                        (
+                            str(term.get("chinese_name") or ""),
+                            str(term.get("beginner_explanation") or ""),
+                            json.dumps(term.get("examples") or [], ensure_ascii=False),
+                            classify_difficulty(name),
+                            term_id,
+                        ),
+                    )
                 if not term_id:
                     continue
                 if capture_id:
-                    conn.execute(
+                    link = conn.execute(
                         """
                         INSERT OR IGNORE INTO term_captures(term_id, capture_id, created_at)
                         VALUES (?, ?, ?)
                         """,
                         (term_id, capture_id, now),
                     )
+                    if link.rowcount > 0 and existing is not None:
+                        # 新来源链接：初次插入的 occurrences=1 已计入首个来源，
+                        # 只有既有术语在别的 capture 再次出现时才累计。
+                        new_source_links += 1
+                        conn.execute(
+                            """
+                            UPDATE terms
+                            SET occurrences = occurrences + 1, review_count = review_count + 1
+                            WHERE id = ?
+                            """,
+                            (term_id,),
+                        )
+                    elif link.rowcount > 0:
+                        new_source_links += 1
+                else:
+                    if existing is not None:
+                        conn.execute(
+                            """
+                            UPDATE terms
+                            SET occurrences = occurrences + 1, review_count = review_count + 1
+                            WHERE id = ?
+                            """,
+                            (term_id,),
+                        )
                 ids.append(term_id)
-        return ids
+        return ids, new_source_links
 
     def save_term(
         self,
@@ -601,17 +708,27 @@ class HistoryStore:
                     (name, domain, chinese_name, beginner_explanation, payload, term_id),
                 )
                 return term_id
+            existing = conn.execute(
+                "SELECT id FROM terms WHERE term = ? AND domain = ?",
+                (name, domain),
+            ).fetchone()
+            if existing is not None:
+                term_id = int(existing["id"])
+                conn.execute(
+                    """
+                    UPDATE terms
+                    SET chinese_name = ?, beginner_explanation = ?, examples = ?, user_edited = 1
+                    WHERE id = ?
+                    """,
+                    (chinese_name, beginner_explanation, payload, term_id),
+                )
+                return term_id
             cursor = conn.execute(
                 """
                 INSERT INTO terms
                     (term, domain, chinese_name, beginner_explanation, examples,
                      first_seen_at, review_count, occurrences, user_edited)
                 VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1)
-                ON CONFLICT(term, domain) DO UPDATE SET
-                    chinese_name = excluded.chinese_name,
-                    beginner_explanation = excluded.beginner_explanation,
-                    examples = excluded.examples,
-                    user_edited = 1
                 """,
                 (
                     name,
@@ -624,20 +741,30 @@ class HistoryStore:
             )
             return int(cursor.lastrowid or 0)
 
+    def get_term(self, term_id: int) -> TermRecord | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM terms WHERE id = ?", (term_id,)).fetchone()
+        return _term_from_row(row) if row else None
+
     def delete_term(self, term_id: int) -> None:
         with self._connect() as conn:
+            conn.execute("DELETE FROM review_events WHERE term_id = ?", (term_id,))
             conn.execute("DELETE FROM term_captures WHERE term_id = ?", (term_id,))
             conn.execute("DELETE FROM terms WHERE id = ?", (term_id,))
 
     def toggle_term_favorite(self, term_id: int) -> bool:
         """Flip favorite; favoriting schedules the term into the review queue."""
+        row = self.get_term(term_id)
+        if row is None:
+            return False
+        self._set_term_favorite(term_id, not row.favorite)
+        return not row.favorite
+
+    def _set_term_favorite(self, term_id: int, favorite: bool) -> None:
+        """Set favorite explicitly; the single write point for favorite semantics."""
         now = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
-            row = conn.execute("SELECT favorite FROM terms WHERE id = ?", (term_id,)).fetchone()
-            if row is None:
-                return False
-            new_favorite = 0 if row["favorite"] else 1
-            if new_favorite:
+            if favorite:
                 conn.execute(
                     "UPDATE terms SET favorite = 1, due_at = ?, status = 'review' WHERE id = ?",
                     (now, term_id),
@@ -647,7 +774,6 @@ class HistoryStore:
                     "UPDATE terms SET favorite = 0, due_at = '', status = 'new' WHERE id = ?",
                     (term_id,),
                 )
-        return bool(new_favorite)
 
     def record_term_view(self, term_id: int) -> None:
         """Bump the view counter — a behavior signal used to un-fold basic terms."""
@@ -689,7 +815,28 @@ class HistoryStore:
                 """,
                 (ease, interval, lapses, due_at, last_review_at, term_id),
             )
-        return {"interval_days": interval, "due_at": due_at, "ease": round(ease, 2)}
+            conn.execute(
+                """
+                INSERT INTO review_events
+                    (term_id, grade, reviewed_at, interval_days, ease, lapses, term_domain)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    term_id,
+                    grade,
+                    last_review_at,
+                    interval,
+                    ease,
+                    lapses,
+                    str(row["domain"] or ""),
+                ),
+            )
+        return {
+            "interval_days": interval,
+            "due_at": due_at,
+            "ease": round(ease, 2),
+            "lapses": lapses,
+        }
 
     def list_due_terms(self, limit: int = 50) -> list[TermRecord]:
         now = datetime.now().isoformat(timespec="seconds")
@@ -754,6 +901,41 @@ class HistoryStore:
             )
             return int(cursor.lastrowid or 0)
 
+    def _save_tip_if_absent(
+        self,
+        capture_id: int,
+        content: str,
+        tip_type: str = "followup",
+        domain: str = "",
+        context_id: int | None = None,
+    ) -> int:
+        """Insert a learning tip unless the same capture already has one with
+        identical content/type/domain — then reuse the existing row id."""
+        content = (content or "").strip()
+        if not content:
+            return 0
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT id FROM learning_tips
+                WHERE capture_id = ? AND content = ? AND tip_type = ? AND domain = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (capture_id, content, tip_type or "followup", domain or ""),
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            created_at = datetime.now().isoformat(timespec="seconds")
+            cursor = conn.execute(
+                """
+                INSERT INTO learning_tips(capture_id, context_id, domain, content, tip_type, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (capture_id, context_id, domain or "", content, tip_type or "followup", created_at),
+            )
+            return int(cursor.lastrowid or 0)
+
     def list_learning_tips(
         self,
         status: str = "pending",
@@ -793,6 +975,11 @@ class HistoryStore:
                 (status, done_at, tip_id),
             )
             return cursor.rowcount > 0
+
+    def get_learning_tip(self, tip_id: int) -> LearningTip | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM learning_tips WHERE id = ?", (tip_id,)).fetchone()
+        return _tip_from_row(row) if row else None
 
     def count_learning_tips(self, status: str = "pending") -> int:
         with self._connect() as conn:
