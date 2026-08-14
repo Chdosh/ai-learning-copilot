@@ -21,7 +21,7 @@
 ## 个人知识库 P1
 
 - [x] **P1-A 查询契约与失败测试**：`TermViewItem/TermPage` 契约、三个视图、方向三级回退、基础词规则、封顶常量、稳定分页与排序理由的 16 项红灯测试（tests/test_term_views.py）
-- [ ] **P1-B 统一查询实现**：`KnowledgeBase.query_terms` 返回列表、总数、领域统计和排序理由；禁止 N+1，不新增 schema
+- [x] **P1-B 统一查询实现**：`KnowledgeBase.query_terms` 聚合查询（列表/总数/领域统计/理由一次返回），分层排序与封顶，无 N+1；1000 术语/10000 链接基准 25.5ms（红线 100ms）
 - [ ] **P1-C 最小 UI 接线**：重点 / 当前方向 / 全部切换，详情显示排序理由；不重做术语页
 - [ ] **P1-D 验收收口**：知识脊柱回归、真实数据库副本、查询基准和桌面 smoke
 - [ ] **独立可靠性修复**：`delete_capture` 清理 conversation/message 关系并处理历史孤儿；不混入 P1 排序模型
