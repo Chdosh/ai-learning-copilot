@@ -42,6 +42,7 @@ from app.paths import DATA_DIR, DB_PATH, PROJECT_DIR, SCREENSHOTS_DIR, ensure_ap
 from app.services.categorizer import get_all_categories
 from app.services.context_detector import DOMAIN_KEYWORDS
 from app.services.history_store import CaptureRecord, HistoryStore, TermRecord
+from app.services.knowledge_base import KnowledgeBase, SaveTermCommand
 from app.services.ocr import OCRService
 from app.services.screenshot import ScreenshotError, take_screenshots
 from app.services.hotkey import HotkeyManager
@@ -131,6 +132,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         ensure_app_dirs()
         self.history_store = HistoryStore()
+        self.knowledge_base = KnowledgeBase(self.history_store)
         self.settings_service = SettingsService(self.history_store)
         self.settings = self.settings_service.load()
         self.ocr_service = OCRService()
@@ -408,7 +410,7 @@ class MainWindow(QMainWindow):
         self.terms_next_button.setEnabled(self._terms_page < self._terms_pages - 1)
         self._update_terms_hscroll_buttons()
         if hasattr(self, "terms_review_button"):
-            due = self.history_store.count_due_terms()
+            due = self.knowledge_base.count_due_terms()
             self.terms_review_button.setText(f"今日复习 ({due})" if due else "今日复习")
         if hasattr(self, "sidebar_stats_value"):
             fav_count = self.history_store.count_favorite_terms()
@@ -568,7 +570,7 @@ class MainWindow(QMainWindow):
         self.nav_buttons: list[QPushButton] = []
         self.pages = QStackedWidget()
         self.overview_page = OverviewPage(self.history_store, self.settings_service)
-        self.workbench_page = WorkbenchPage(self.history_store, self.settings_service)
+        self.workbench_page = WorkbenchPage(self.history_store, self.settings_service, self.knowledge_base)
         self.workbench_page.context_changed.connect(self._on_context_changed)
         self._add_page(sidebar_layout, "获取", self.overview_page)
         self._add_page(sidebar_layout, "工作台", self.workbench_page)
@@ -1563,7 +1565,7 @@ class MainWindow(QMainWindow):
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
-        due_count = self.history_store.count_due_terms()
+        due_count = self.knowledge_base.count_due_terms()
         if due_count > 0:
             self.tray.showMessage(
                 "今日复习",
@@ -1670,7 +1672,7 @@ class MainWindow(QMainWindow):
     def _load_term_sources(self, term_id: int) -> None:
         if not hasattr(self, "term_sources_list"):
             return
-        sources = self.history_store.list_term_captures(term_id, limit=30)
+        sources = self.knowledge_base.list_term_sources(term_id, limit=30)
         self.term_sources_list.clear()
         if not sources:
             placeholder = QListWidgetItem("（暂无出处）")
@@ -1690,7 +1692,8 @@ class MainWindow(QMainWindow):
         self._show_selected_term()
         row = self.terms_table.currentRow()
         if 0 <= row < len(self._terms_records):
-            self.history_store.record_term_view(self._terms_records[row].id)
+            updated = self.knowledge_base.record_view(self._terms_records[row].id)
+            self._terms_records[row] = updated
 
     def _on_term_source_clicked(self, item: QListWidgetItem) -> None:
         capture_id = item.data(Qt.ItemDataRole.UserRole)
@@ -1700,7 +1703,7 @@ class MainWindow(QMainWindow):
         self.overview_page.select_capture(int(capture_id))
 
     def _open_review(self) -> None:
-        dialog = ReviewDialog(self.history_store, self)
+        dialog = ReviewDialog(self.knowledge_base, self)
         dialog.exec()
         self.refresh_terms()
         self._refresh_sidebar_stats()
@@ -1736,12 +1739,14 @@ class MainWindow(QMainWindow):
         if not ok:
             return
         examples = [item.strip() for item in examples_text.split("；") if item.strip()]
-        self.history_store.save_term(
-            term=term,
-            chinese_name=chinese_name,
-            beginner_explanation=explanation,
-            examples=examples,
-            domain="通用",
+        self.knowledge_base.save_term(
+            SaveTermCommand(
+                term=term,
+                chinese_name=chinese_name,
+                beginner_explanation=explanation,
+                examples=examples,
+                domain="通用",
+            )
         )
         self.refresh_terms()
         self.status_label.setText("术语已新增。")
@@ -1775,13 +1780,15 @@ class MainWindow(QMainWindow):
             return
         examples = [item.strip() for item in examples_text.split("；") if item.strip()]
         try:
-            self.history_store.save_term(
-                term=term,
-                chinese_name=chinese_name,
-                beginner_explanation=explanation,
-                examples=examples,
-                term_id=current.id,
-                domain=current.domain,
+            self.knowledge_base.save_term(
+                SaveTermCommand(
+                    term=term,
+                    chinese_name=chinese_name,
+                    beginner_explanation=explanation,
+                    examples=examples,
+                    term_id=current.id,
+                    domain=current.domain,
+                )
             )
         except Exception as exc:
             QMessageBox.warning(self, "编辑失败", str(exc))
@@ -1794,16 +1801,13 @@ class MainWindow(QMainWindow):
         if row < 0 or row >= len(self._terms_records):
             return
         term = self._terms_records[row]
-        new_state = self.history_store.toggle_term_favorite(term.id)
-        self._terms_records[row] = TermRecord(
-            id=term.id, term=term.term, chinese_name=term.chinese_name,
-            beginner_explanation=term.beginner_explanation, examples=term.examples,
-            first_seen_at=term.first_seen_at, review_count=term.review_count,
-            domain=term.domain, favorite=new_state,
-        )
+        updated = self.knowledge_base.set_favorite(term.id, favorite=not term.favorite)
+        self._terms_records[row] = updated
         self._show_selected_term()
         self._refresh_sidebar_stats()
-        self.status_label.setText(f"术语「{term.term}」{'已收藏' if new_state else '取消收藏'}")
+        self.status_label.setText(
+            f"术语「{term.term}」{'已收藏' if updated.favorite else '取消收藏'}"
+        )
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:

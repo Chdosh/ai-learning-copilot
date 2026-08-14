@@ -16,7 +16,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.services.history_store import HistoryStore, TermRecord
+from app.services.history_store import TermRecord
+from app.services.knowledge_base import KnowledgeBase
 from app.ui.theme import (
     BORDER,
     CARD,
@@ -50,12 +51,12 @@ _GRADE_STYLES = {
 class ReviewDialog(QDialog):
     """One term at a time: front shows the term, reveal shows the answer."""
 
-    def __init__(self, history_store: HistoryStore, parent: QWidget | None = None) -> None:
+    def __init__(self, knowledge_base: KnowledgeBase, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.history_store = history_store
+        self.knowledge_base = knowledge_base
         self.setWindowTitle("今日复习")
         self.setMinimumSize(480, 400)
-        self._queue = history_store.list_due_terms(limit=100)
+        self._queue = knowledge_base.list_due_terms(limit=100)
         self._index = 0
         self._reviewed = 0
         self._current: TermRecord | None = None
@@ -162,7 +163,7 @@ class ReviewDialog(QDialog):
     def _grade(self, grade: int) -> None:
         if self._current is None:
             return
-        self.history_store.review_term(self._current.id, grade)
+        self.knowledge_base.review(self._current.id, grade)
         self._reviewed += 1
         self._index += 1
         self._show_current()

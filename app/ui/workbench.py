@@ -35,6 +35,7 @@ from app.services.context_detector import (
     extract_keywords,
 )
 from app.services.history_store import ContextRecord, HistoryStore, LearningTip
+from app.services.knowledge_base import KnowledgeBase, TipQuery
 from app.services.settings import SettingsService
 from app.ui.theme import (
     ArrowSendButton,
@@ -179,11 +180,13 @@ class WorkbenchPage(QWidget):
         self,
         history_store: HistoryStore,
         settings_service: SettingsService,
+        knowledge_base: KnowledgeBase,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.history_store = history_store
         self.settings_service = settings_service
+        self.knowledge_base = knowledge_base
         self._editing_context_id: int | None = None
         self._form_open = True
         self._refreshing_direction_selector = False
@@ -524,7 +527,7 @@ class WorkbenchPage(QWidget):
         scope = "pending"
         if hasattr(self, "tips_scope_combo"):
             scope = str(self.tips_scope_combo.currentData() or "pending")
-        tips = self.history_store.list_learning_tips(status=scope, limit=60)
+        tips = self.knowledge_base.list_tips(TipQuery(status=scope, limit=60))
         while self.tips_list_layout.count():
             item = self.tips_list_layout.takeAt(0)
             widget = item.widget()
@@ -576,7 +579,7 @@ class WorkbenchPage(QWidget):
         return row
 
     def _set_tip_status(self, tip_id: int, status: str) -> None:
-        self.history_store.set_learning_tip_status(tip_id, status)
+        self.knowledge_base.set_tip_status(tip_id, status)
         self.refresh_tips()
 
     # ---- 自沉淀：把最近内容合并进当前学习方向 ----

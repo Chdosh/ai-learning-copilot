@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QScrollArea
 
 from app.services.history_store import HistoryStore
+from app.services.knowledge_base import KnowledgeBase
 from app.services.settings import SettingsService
 from app.ui.main_window import MainWindow
 from app.ui.overview import OverviewPage
@@ -113,7 +114,7 @@ def test_workbench_save_creates_context_and_sets_current(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     settings_service = SettingsService(store)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     assert settings_service.load().current_context_id is None
     assert "通用" in [workbench.domain_combo.itemText(i) for i in range(workbench.domain_combo.count())]
@@ -163,7 +164,7 @@ def test_workbench_save_never_updates_unselected_record(tmp_path) -> None:
         summary="CRISPR 基因编辑",
     )
 
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     workbench.domain_combo.setCurrentText("生物")
     workbench.scene_combo.setCurrentText("技术文档")
     workbench.summary_input.setPlainText("串口协议手册")
@@ -183,7 +184,7 @@ def test_workbench_same_domain_different_scenes_coexist(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     settings_service = SettingsService(store)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     workbench.domain_combo.setCurrentText("生物")
     workbench.scene_combo.setCurrentText("学术论文")
@@ -225,7 +226,7 @@ def test_workbench_direction_fields_load_current_context(tmp_path) -> None:
     )
     settings_service.set_current_context(context_id)
 
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     assert workbench.domain_combo.currentText() == "生物"
     assert workbench.scene_combo.currentText() == "学术论文"
     assert "CRISPR 基因编辑" in workbench.summary_input.toPlainText()
@@ -252,7 +253,7 @@ def test_workbench_edit_only_updates_selected_id(tmp_path) -> None:
     b_id = store.save_context(name="编程", domain="编程", scene="通用", summary="Python")
     settings_service.set_current_context(a_id)
 
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     workbench._edit_direction(b_id)
     workbench.domain_combo.setCurrentText("医学")
     workbench.apply_direction_button.click()
@@ -283,7 +284,7 @@ def test_workbench_switch_does_not_modify_record(tmp_path) -> None:
     b_id = store.save_context(name="编程", domain="编程", scene="通用", summary="Python")
     settings_service.set_current_context(a_id)
 
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     workbench._switch_to(b_id)
     assert settings_service.load().current_context_id == b_id
     assert store.get_context(a_id).summary == "CRISPR 基因编辑"
@@ -302,7 +303,7 @@ def test_workbench_draft_does_not_affect_effective_direction(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     settings_service = SettingsService(store)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     workbench.domain_combo.setCurrentText("生物")
     workbench.scene_combo.setCurrentText("学术论文")
@@ -337,7 +338,7 @@ def test_workbench_direction_operations_are_visible_and_selector_switches(tmp_pa
     code_id = store.save_context(name="Python 文档", domain="编程", scene="技术文档")
     settings_service.set_current_context(bio_id)
 
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     assert workbench.direction_selector.findData(bio_id) >= 0
     assert workbench.direction_selector.findData(code_id) >= 0
     assert workbench.new_direction_button.text() == "新建"
@@ -358,7 +359,7 @@ def test_workbench_quick_direction_applies_without_creating_custom_record(tmp_pa
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     settings_service = SettingsService(store)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     before = [item for item in store.list_contexts() if not item.builtin]
 
     workbench.quick_domain_combo.setCurrentText("生物")
@@ -379,7 +380,7 @@ def test_main_window_context_change_keeps_applied_quick_direction(tmp_path) -> N
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     settings_service = SettingsService(store)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     class ContextChangeReceiver:
         def __init__(self) -> None:
@@ -414,7 +415,7 @@ def test_custom_direction_stays_selected_when_clicking_quick_apply(tmp_path) -> 
         scene="学术论文",
         summary="CRISPR 基因编辑",
     )
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     workbench.direction_selector.setCurrentIndex(
         workbench.direction_selector.findData(context_id)
@@ -439,7 +440,7 @@ def test_custom_direction_can_switch_to_changed_quick_values(tmp_path) -> None:
         scene="学术论文",
         summary="CRISPR 基因编辑",
     )
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     workbench.direction_selector.setCurrentIndex(
         workbench.direction_selector.findData(context_id)
@@ -458,7 +459,7 @@ def test_workbench_abstract_analysis_fills_custom_context_and_enters_prompt(tmp_
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     settings_service = SettingsService(store)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     abstract = (
         "本研究使用 CRISPR 基因编辑分析细胞 DNA 突变与蛋白质表达。"
         "实验方法、样本、结果和结论显示该基因影响细胞功能。"
@@ -493,7 +494,7 @@ def test_workbench_editor_keeps_explicit_target_when_current_direction_changes(t
     bio_id = store.save_context(name="生物论文", domain="生物", scene="学术论文")
     code_id = store.save_context(name="Python 文档", domain="编程", scene="技术文档")
     settings_service.set_current_context(bio_id)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     workbench.edit_direction_button.click()
     workbench.summary_input.setPlainText("尚未保存的生物草稿")
@@ -512,7 +513,7 @@ def test_workbench_custom_names_and_duplicate_names_remain_distinguishable(tmp_p
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     settings_service = SettingsService(store)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
 
     workbench.new_direction_button.click()
     workbench.name_input.setText("考试重点")
@@ -549,7 +550,7 @@ def test_workbench_repairing_current_direction_emits_context_changed(tmp_path) -
     settings_service = SettingsService(store)
     context_id = store.save_context(name="生物", domain="通用", scene="技术文档")
     settings_service.set_current_context(context_id)
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     changed: list = []
     workbench.context_changed.connect(changed.append)
 
@@ -572,7 +573,7 @@ def test_workbench_mismatch_proposals_and_repair(tmp_path) -> None:
     parse_id = store.save_context(name="编程 · 学术论文", domain="医学", scene="学术论文")
     good_id = store.save_context(name="化学", domain="化学", scene="通用")
 
-    workbench = WorkbenchPage(store, settings_service)
+    workbench = WorkbenchPage(store, settings_service, KnowledgeBase(store))
     proposals = workbench._repair_proposals()
     by_id = {int(p["record"].id): p for p in proposals}
     assert bad_id in by_id
@@ -646,7 +647,7 @@ def test_overview_delete_capture(tmp_path) -> None:
 def test_workbench_no_longer_contains_recognition_module(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
-    workbench = WorkbenchPage(store, SettingsService(store))
+    workbench = WorkbenchPage(store, SettingsService(store), KnowledgeBase(store))
 
     assert not hasattr(workbench, "learn_stack")
     assert not hasattr(workbench, "mode_screenshot_btn")
@@ -691,7 +692,7 @@ def test_sidebar_screenshot_action_is_below_settings(tmp_path, monkeypatch) -> N
 def test_workbench_shows_current_direction_on_the_left(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
-    workbench = WorkbenchPage(store, SettingsService(store))
+    workbench = WorkbenchPage(store, SettingsService(store), KnowledgeBase(store))
 
     columns = workbench.findChild(QScrollArea).widget().layout()
     assert columns.itemAt(0).widget().layout().itemAt(0).widget() is workbench.direction_status_card
@@ -704,7 +705,7 @@ def test_workbench_shows_current_direction_on_the_left(tmp_path) -> None:
 def test_custom_direction_inputs_use_a_full_width_row(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
-    workbench = WorkbenchPage(store, SettingsService(store))
+    workbench = WorkbenchPage(store, SettingsService(store), KnowledgeBase(store))
 
     assert workbench.domain_custom.minimumWidth() >= 120
     assert workbench.scene_custom.minimumWidth() >= 120
