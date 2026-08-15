@@ -508,34 +508,3 @@ class SummaryWorker(QThread):
         self.completed.emit({"summary": summary})
 
 
-class DigestWorker(QThread):
-    """Merge recent learning items into a direction's background summary (自沉淀)."""
-
-    completed = Signal(dict)
-
-    def __init__(
-        self,
-        existing_summary: str,
-        new_items: str,
-        settings: AppSettings,
-        last_capture_id: int = 0,
-    ) -> None:
-        super().__init__()
-        self.existing_summary = existing_summary
-        self.new_items = new_items
-        self.settings = settings
-        self.last_capture_id = last_capture_id
-
-    def run(self) -> None:
-        try:
-            summary = AIClient(self.settings).merge_summary(
-                self.existing_summary, self.new_items
-            )
-        except Exception as exc:
-            self.completed.emit({"error": f"生成背景要点失败: {exc}"})
-            return
-        self.completed.emit(
-            {"summary": summary, "last_capture_id": self.last_capture_id}
-        )
-
-

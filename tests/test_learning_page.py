@@ -5,7 +5,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from app.services.history_store import HistoryStore
 from app.services.knowledge_base import (
@@ -88,44 +88,12 @@ def test_learning_page_tips_lifecycle(tmp_path) -> None:
     app.processEvents()
 
 
-def test_learning_page_digest_requires_saved_direction(tmp_path, monkeypatch) -> None:
+def test_learning_page_has_no_digest_into_direction(tmp_path) -> None:
+    """沉淀只进知识库：学习页不得存在任何写回学习方向的自沉淀入口。"""
     app = QApplication.instance() or QApplication([])
     store, service, kb, page = _page(tmp_path)
 
-    messages: list[str] = []
-
-    def fake_information(parent, title, text, *args, **kwargs):
-        messages.append((title, text))
-
-    monkeypatch.setattr(QMessageBox, "information", staticmethod(fake_information))
-
-    page._start_digest()
-    assert messages
-    assert "自沉淀" in messages[0][0]
-    assert "学习方向" in messages[0][1]
-    assert "已取消" not in page.digest_status_label.text()
-    page.deleteLater()
-    app.processEvents()
-
-
-def test_learning_page_digest_with_saved_direction_reports_no_new_content(
-    tmp_path, monkeypatch
-) -> None:
-    app = QApplication.instance() or QApplication([])
-    store, service, kb, page = _page(tmp_path)
-
-    context_id = store.save_context(name="生物", domain="生物", scene="通用")
-    service.set_current_context(context_id)
-
-    messages: list[str] = []
-
-    def fake_information(parent, title, text, *args, **kwargs):
-        messages.append((title, text))
-
-    monkeypatch.setattr(QMessageBox, "information", staticmethod(fake_information))
-
-    page._start_digest()
-    assert messages
-    assert "暂无新内容" in messages[0][1]
+    for attribute in ("digest_button", "digest_status_label", "_start_digest", "_digest_worker"):
+        assert not hasattr(page, attribute), f"learning page still exposes {attribute}"
     page.deleteLater()
     app.processEvents()

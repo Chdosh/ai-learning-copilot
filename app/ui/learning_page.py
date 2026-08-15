@@ -1,29 +1,27 @@
-"""学习页：知识资产的行动入口（自沉淀 / 自学习闭环的 UI 侧）。
+"""学习页：个人知识沉淀的行动入口。
 
-承载三个区块，全部由工作台迁入，让工作台回归"学习方向"单一职责：
+承载两个区块（知识资产的 UI 侧）：
 
 - 今日复习：间隔重复到期队列入口；
-- 学习建议：AI 建议清单，完成 / 忽略状态流转；
-- 自沉淀：把最近学到的内容合并进当前学习方向的背景要点（预览确认，绝不静默改写）。
+- 学习建议：AI 建议清单，完成 / 忽略状态流转。
+
+沉淀方向：AI 产出的知识只进入术语本与学习建议（个人知识库），
+绝不写回学习方向——方向只负责截图识别与解释口径。
 """
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog,
-    QDialogButtonBox,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QScrollArea,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from app.services.history_store import ContextRecord, HistoryStore, LearningTip
+from app.services.history_store import HistoryStore, LearningTip
 from app.services.knowledge_base import KnowledgeBase, TipQuery
 from app.services.settings import SettingsService
 from app.ui.review import ReviewDialog
@@ -41,7 +39,6 @@ from app.ui.theme import (
     apply_primary_button_style,
     button_qss,
 )
-from app.ui.workers import DigestWorker
 
 
 def _card_title(text: str) -> QLabel:
@@ -53,48 +50,6 @@ def _card_title(text: str) -> QLabel:
     label.setFixedHeight(22)
     label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     return label
-
-
-class SummaryPreviewDialog(QDialog):
-    """沉淀预览：原要点与合并后要点并排，用户确认后才写入。"""
-
-    def __init__(self, old_summary: str, new_summary: str, parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("确认沉淀")
-        self.setMinimumSize(560, 420)
-
-        layout = QVBoxLayout(self)
-        layout.setSpacing(10)
-        tip = QLabel("将把以下合并后的背景要点写入当前学习方向（原内容会被替换）：")
-        tip.setWordWrap(True)
-        tip.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        layout.addWidget(tip)
-
-        old_title = QLabel("当前背景要点")
-        old_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(old_title)
-        old_box = QTextEdit()
-        old_box.setReadOnly(True)
-        old_box.setPlainText(old_summary or "（空）")
-        old_box.setMaximumHeight(84)
-        layout.addWidget(old_box)
-
-        new_title = QLabel("合并后的背景要点")
-        new_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(new_title)
-        new_box = QTextEdit()
-        new_box.setReadOnly(True)
-        new_box.setPlainText(new_summary)
-        layout.addWidget(new_box, 1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("应用")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
 
 
 class LearningPage(QWidget):
@@ -111,7 +66,6 @@ class LearningPage(QWidget):
         self.history_store = history_store
         self.settings_service = settings_service
         self.knowledge_base = knowledge_base
-        self._digest_worker = None
         self._build_ui()
         self.refresh()
 
@@ -135,7 +89,6 @@ class LearningPage(QWidget):
         layout.setSpacing(12)
         layout.addWidget(self._build_review_card())
         layout.addWidget(self._build_tips_card())
-        layout.addWidget(self._build_digest_card())
         layout.addStretch(1)
         scroll.setWidget(centered)
         outer.addWidget(scroll)
@@ -269,117 +222,6 @@ class LearningPage(QWidget):
     def _set_tip_status(self, tip_id: int, status: str) -> None:
         self.knowledge_base.set_tip_status(tip_id, status)
         self.refresh_tips()
-
-    # ---- 自沉淀：把最近内容合并进当前学习方向 ----
-
-    def _build_digest_card(self) -> QFrame:
-        card = self._build_card()
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
-        layout.addWidget(_card_title("自沉淀"))
-        hint = QLabel(
-            "把最近学到的内容合并进当前学习方向的背景要点，让 AI 解释越用越懂你。"
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(hint)
-        self.digest_button = QPushButton("把最近内容沉淀进当前方向")
-        self.digest_button.setStyleSheet(button_qss())
-        self.digest_button.setToolTip("合并后需人工确认才会写入，绝不静默修改")
-        self.digest_button.clicked.connect(self._start_digest)
-        layout.addWidget(self.digest_button)
-        self.digest_status_label = QLabel("")
-        self.digest_status_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        self.digest_status_label.setWordWrap(True)
-        layout.addWidget(self.digest_status_label)
-        return card
-
-    def _current_context(self) -> ContextRecord | None:
-        context_id = self.settings_service.load().current_context_id
-        if context_id is None:
-            return None
-        record = self.history_store.get_context(context_id)
-        if record is None or record.builtin:
-            return None
-        return record
-
-    def _digest_cursor(self, context_id: int) -> int:
-        raw = self.history_store.get_settings().get(f"digest_after_{context_id}", "")
-        return int(raw) if str(raw).strip().isdigit() else 0
-
-    def _set_digest_cursor(self, context_id: int, capture_id: int) -> None:
-        self.history_store.set_setting(f"digest_after_{context_id}", str(capture_id))
-
-    def _start_digest(self) -> None:
-        context = self._current_context()
-        if context is None:
-            QMessageBox.information(
-                self,
-                "自沉淀",
-                "请先在工作台新建或选择一个学习方向，才能把内容沉淀进它的背景要点。",
-            )
-            return
-        domain = context.domain or "通用"
-        captures = self.history_store.search_captures_advanced(domain=domain, limit=200)
-        cursor = self._digest_cursor(context.id)
-        new_captures = sorted(
-            (capture for capture in captures if capture.id > cursor),
-            key=lambda capture: capture.id,
-        )[:15]
-        if not new_captures:
-            QMessageBox.information(self, "自沉淀", "当前方向暂无新内容可沉淀。")
-            return
-        items: list[str] = []
-        for capture in new_captures:
-            text = " ".join(
-                part for part in (capture.translation, capture.explanation) if part
-            )
-            if text.strip():
-                items.append(text.strip()[:300])
-        if not items:
-            QMessageBox.information(self, "自沉淀", "当前方向暂无新内容可沉淀。")
-            return
-        self.digest_status_label.setText(f"正在合并 {len(items)} 条新内容…")
-        self.digest_button.setEnabled(False)
-        self._digest_worker = DigestWorker(
-            existing_summary=context.summary or "",
-            new_items="\n".join(items),
-            settings=self.settings_service.load(),
-            last_capture_id=new_captures[-1].id,
-        )
-        self._digest_worker.completed.connect(self._on_digest_done)
-        self._digest_worker.finished.connect(self._digest_worker.deleteLater)
-        self._digest_worker.start()
-
-    def _on_digest_done(self, payload: dict) -> None:
-        self.digest_button.setEnabled(True)
-        if payload.get("error"):
-            self.digest_status_label.setText(str(payload["error"]))
-            return
-        merged = str(payload.get("summary") or "").strip()
-        if not merged:
-            self.digest_status_label.setText("生成失败：AI 未返回内容，背景要点未改动。")
-            return
-        context = self._current_context()
-        if context is None:
-            self.digest_status_label.setText("当前学习方向已变化，背景要点未改动。")
-            return
-        dialog = SummaryPreviewDialog(context.summary or "", merged, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            self.digest_status_label.setText("已取消，背景要点未改动。")
-            return
-        self.history_store.save_context(
-            name=context.name,
-            domain=context.domain or "通用",
-            scene=context.scene or "通用",
-            summary=merged,
-            instruction=context.instruction or "",
-            context_id=context.id,
-        )
-        self._set_digest_cursor(context.id, int(payload.get("last_capture_id") or 0))
-        self.digest_status_label.setText("已沉淀到当前学习方向。")
-        self.context_changed.emit(context.id)
 
     # ---- 刷新 ----
 

@@ -194,8 +194,11 @@ QPushButton {{
     background: transparent;
     border: 1px solid {BORDER};
     border-radius: {RADIUS_MD};
-    padding: 3px 10px;
+    min-width: 36px;
+    min-height: 22px;
+    padding: 2px 8px;
     color: {TEXT_SECONDARY};
+    font-size: 13px;
 }}
 QPushButton:hover {{ border-color: {PRIMARY}; color: {PRIMARY}; }}
 QPushButton:pressed {{ background: {PRIMARY_SOFT}; }}
@@ -266,6 +269,7 @@ class WorkbenchPage(QWidget):
         domain_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
         domain_layout.addWidget(domain_title)
         self.domain_combo = self._build_editable_combo(PRESET_DOMAINS, "领域可直接输入自定义值")
+        self.domain_combo.setMinimumWidth(180)
         self.domain_combo.setMaximumWidth(220)
         self.domain_combo.currentTextChanged.connect(self._on_form_edited)
         domain_layout.addWidget(self.domain_combo)
@@ -280,6 +284,7 @@ class WorkbenchPage(QWidget):
         scene_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
         scene_layout.addWidget(scene_title)
         self.scene_combo = self._build_editable_combo(PRESET_SCENES, "场景可直接输入自定义值")
+        self.scene_combo.setMinimumWidth(180)
         self.scene_combo.setMaximumWidth(220)
         self.scene_combo.currentTextChanged.connect(self._on_form_edited)
         scene_layout.addWidget(self.scene_combo)
@@ -294,6 +299,11 @@ class WorkbenchPage(QWidget):
         card_layout.addWidget(self.advanced_toggle, 0, Qt.AlignmentFlag.AlignLeft)
 
         self.advanced_panel = QWidget()
+        self.advanced_panel.setObjectName("advancedPanel")
+        self.advanced_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.advanced_panel.setStyleSheet(
+            f"QWidget#advancedPanel {{ background: {CARD}; }}"
+        )
         advanced_layout = QVBoxLayout(self.advanced_panel)
         advanced_layout.setContentsMargins(0, 2, 0, 0)
         advanced_layout.setSpacing(8)
@@ -323,6 +333,7 @@ class WorkbenchPage(QWidget):
         self.context_source_input.setPlaceholderText(
             "粘贴论文摘要或专业内容概述，用于推荐领域、场景并提取回答上下文"
         )
+        self.context_source_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.context_source_input.setStyleSheet(
             "QTextEdit { border: none; background: transparent; padding: 4px 8px; "
             "selection-background-color: #EFF4FF; }"
@@ -416,7 +427,11 @@ class WorkbenchPage(QWidget):
         self.direction_list.setStyleSheet(
             f"""
             QListWidget#directionList {{ background: transparent; border: none; outline: 0; }}
-            QListWidget#directionList::item {{ background: transparent; border: none; }}
+            QListWidget#directionList::item {{
+                background: transparent;
+                border: none;
+                padding: 0;
+            }}
             QListWidget#directionList::item:selected {{ background: {PRIMARY_SOFT}; border-radius: 6px; }}
             """
         )
@@ -724,7 +739,7 @@ class WorkbenchPage(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, record.id)
             row_widget = self._build_direction_row(display, record, record.id == current_id)
-            item.setSizeHint(QSize(0, 34))
+            item.setSizeHint(QSize(0, row_widget.sizeHint().height()))
             self.direction_list.addItem(item)
             self.direction_list.setItemWidget(item, row_widget)
 
