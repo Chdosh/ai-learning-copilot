@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -143,6 +144,42 @@ class RelatedTermItem:
 @dataclass(slots=True)
 class RelatedTermPage:
     items: list[RelatedTermItem]
+
+
+@dataclass(slots=True)
+class RecommendationQuery:
+    """一次"延伸推荐"查询（方案 §7.3 P1.5-D）。
+
+    候选只来自真实事实：二阶共同来源（bridge）、同学习方向（direction）、
+    同领域（domain）、现有 pending 学习建议（tip）。禁止文本相似或
+    embedding 冒充证据，不写入正式术语。
+    """
+
+    term_id: int
+    current_context_id: int | None = None
+    effective_domain: str = "通用"
+    limit: int = 5
+
+
+@dataclass(slots=True)
+class RecommendationItem:
+    """一条延伸推荐：候选 + 类型 + 可理解理由。
+
+    不变量（测试已锁定）：
+    - kind ∈ {"bridge", "direction", "domain", "tip"}，按证据强度排序；
+    - bridge 不得与目标术语存在直接共现（那是"相关知识"的范畴）；
+    - 每条推荐必须携带可理解理由，且允许用户忽略（持久生效）。
+    """
+
+    term: TermRecord | None
+    kind: str
+    reason: str
+    tip_id: int | None = None
+
+
+@dataclass(slots=True)
+class RecommendationPage:
+    items: list[RecommendationItem]
 
 
 # 排序封顶常量：高频只证明“多次出现”，不能无限放大价值（方案 §6.6）。
@@ -343,6 +380,139 @@ class KnowledgeBase:
         if aggregate.term.domain == effective_domain and effective_domain != "通用":
             reasons.append(f"同属 {effective_domain} 领域")
         return tuple(reasons)
+
+    # ------------------------------------------------------------------
+    # P1.5-D 延伸推荐：只认真实来源事实，可忽略，不写正式术语
+    # ------------------------------------------------------------------
+
+    _IGNORED_RECOMMENDATION_KEY = "ignored_recommendation_terms"
+
+    def query_recommendations(self, query: RecommendationQuery) -> RecommendationPage:
+        """返回与目标积累相关的延伸推荐（方案 §7.3 P1.5-D）。
+
+        候选顺序即证据强度：bridge（二阶共同来源）→ direction（同一学习
+        方向但未共现）→ domain（同领域高价值但未共现）→ tip（同领域
+        pending 学习建议）。用户已忽略的术语与建议不再出现。
+        """
+        if query.term_id <= 0:
+            raise ValueError("term_id 必须大于 0")
+        if query.limit <= 0:
+            raise ValueError("limit 必须大于 0")
+
+        ignored = self._ignored_recommendation_term_ids()
+        target = self.store.get_term(query.term_id)
+        target_domain = (target.domain if target is not None else "") or "通用"
+
+        items: list[RecommendationItem] = []
+        for row in self.store._fetch_bridge_recommendations(
+            term_id=query.term_id,
+            limit=query.limit,
+        ):
+            if row["term_id"] in ignored:
+                continue
+            items.append(
+                RecommendationItem(
+                    term=self.store.get_term(int(row["term_id"])),
+                    kind="bridge",
+                    reason=(
+                        f"通过「{row['bridge_name']}」关联——它与当前知识的学习同源"
+                        f"（{row['shared_with_bridge']} 次），值得延伸了解"
+                    ),
+                )
+            )
+        if query.current_context_id is not None:
+            for row in self.store._fetch_direction_recommendations(
+                term_id=query.term_id,
+                current_context_id=query.current_context_id,
+                limit=query.limit,
+            ):
+                if row["term_id"] in ignored:
+                    continue
+                items.append(
+                    RecommendationItem(
+                        term=self.store.get_term(int(row["term_id"])),
+                        kind="direction",
+                        reason=(
+                            f"同一学习方向（{row['source_count']} 条记录），"
+                            "还没在同一来源遇到"
+                        ),
+                    )
+                )
+        if target_domain != "通用":
+            for row in self.store._fetch_domain_recommendations(
+                term_id=query.term_id,
+                domain=target_domain,
+                limit=query.limit,
+            ):
+                if row["term_id"] in ignored:
+                    continue
+                items.append(
+                    RecommendationItem(
+                        term=self.store.get_term(int(row["term_id"])),
+                        kind="domain",
+                        reason=f"同属 {target_domain} 领域，值得延伸了解",
+                    )
+                )
+        for tip in self.store._list_learning_tips(
+            status="pending",
+            domain=target_domain,
+            limit=query.limit,
+        ):
+            items.append(
+                RecommendationItem(
+                    term=None,
+                    kind="tip",
+                    reason=f"学习建议：{tip.content}",
+                    tip_id=tip.id,
+                )
+            )
+        # 去重（同术语可能命中多类候选，保留最强证据类）
+        seen_terms: set[int] = set()
+        deduped: list[RecommendationItem] = []
+        for item in items:
+            if item.term is not None:
+                if item.term.id in seen_terms:
+                    continue
+                seen_terms.add(item.term.id)
+            deduped.append(item)
+            if len(deduped) >= query.limit:
+                break
+        return RecommendationPage(items=deduped)
+
+    def ignore_recommendation(
+        self,
+        term_id: int | None = None,
+        tip_id: int | None = None,
+    ) -> None:
+        """忽略一条推荐：术语进本地忽略列表，建议走状态流转（持久生效）。"""
+        if tip_id is not None:
+            self.store._set_learning_tip_status(tip_id, "ignored")
+            return
+        if term_id is None:
+            return
+        raw = self.store.get_settings().get(self._IGNORED_RECOMMENDATION_KEY, "[]")
+        try:
+            ids = json.loads(raw)
+            if not isinstance(ids, list):
+                ids = []
+        except (TypeError, json.JSONDecodeError):
+            ids = []
+        if term_id not in ids:
+            ids.append(term_id)
+        self.store.set_setting(
+            self._IGNORED_RECOMMENDATION_KEY,
+            json.dumps(ids, ensure_ascii=False),
+        )
+
+    def _ignored_recommendation_term_ids(self) -> set[int]:
+        raw = self.store.get_settings().get(self._IGNORED_RECOMMENDATION_KEY, "[]")
+        try:
+            ids = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return set()
+        if not isinstance(ids, list):
+            return set()
+        return {int(term_id) for term_id in ids if str(term_id).strip().isdigit()}
 
     @staticmethod
     def _direction_level(aggregate: TermAggregate, effective_domain: str) -> int:

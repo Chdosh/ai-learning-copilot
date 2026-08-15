@@ -1464,6 +1464,136 @@ class HistoryStore:
             for row in rows
         ]
 
+    # ------------------------------------------------------------------
+    # P1.5-D 延伸推荐：候选只来自真实来源事实（动态 SQL，不物化关系）
+    # ------------------------------------------------------------------
+
+    def _fetch_bridge_recommendations(
+        self,
+        *,
+        term_id: int,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        """二阶共同来源：目标术语的直接共现（bridge），再从 bridge 的
+        全部来源找它的其它共现，排除目标术语与其直接共现集合。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                WITH direct AS (
+                    SELECT DISTINCT tc.term_id
+                    FROM term_captures tc
+                    WHERE tc.capture_id IN (
+                        SELECT capture_id FROM term_captures WHERE term_id = ?
+                    )
+                      AND tc.term_id != ?
+                ),
+                bridges AS (
+                    SELECT DISTINCT tc2.term_id AS bridge_id
+                    FROM term_captures tc1
+                    JOIN term_captures tc2
+                      ON tc2.capture_id = tc1.capture_id
+                         AND tc2.term_id != tc1.term_id
+                    WHERE tc1.term_id = ?
+                ),
+                second_hop AS (
+                    SELECT tc.term_id AS candidate_id,
+                           b.bridge_id AS bridge_id,
+                           COUNT(DISTINCT tc.capture_id) AS shared_with_bridge
+                    FROM bridges b
+                    JOIN term_captures btc ON btc.term_id = b.bridge_id
+                    JOIN term_captures tc
+                      ON tc.capture_id = btc.capture_id
+                         AND tc.term_id != b.bridge_id
+                    WHERE tc.term_id != ?
+                      AND tc.term_id NOT IN (SELECT term_id FROM direct)
+                    GROUP BY tc.term_id, b.bridge_id
+                ),
+                ranked AS (
+                    SELECT s.*,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY s.candidate_id
+                               ORDER BY s.shared_with_bridge DESC, s.bridge_id ASC
+                           ) AS rn
+                    FROM second_hop s
+                )
+                SELECT r.candidate_id AS term_id,
+                       r.shared_with_bridge,
+                       bt.term AS bridge_name
+                FROM ranked r
+                JOIN terms bt ON bt.id = r.bridge_id
+                WHERE r.rn = 1
+                ORDER BY r.shared_with_bridge DESC, r.candidate_id ASC
+                LIMIT ?
+                """,
+                (term_id, term_id, term_id, term_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _fetch_direction_recommendations(
+        self,
+        *,
+        term_id: int,
+        current_context_id: int,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        """同一学习方向出现、但未与目标术语共现的其它术语。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                WITH direct AS (
+                    SELECT DISTINCT tc.term_id
+                    FROM term_captures tc
+                    WHERE tc.capture_id IN (
+                        SELECT capture_id FROM term_captures WHERE term_id = ?
+                    )
+                      AND tc.term_id != ?
+                )
+                SELECT tc.term_id AS term_id,
+                       COUNT(DISTINCT tc.capture_id) AS source_count
+                FROM term_captures tc
+                JOIN captures c ON c.id = tc.capture_id
+                WHERE c.context_id = ?
+                  AND tc.term_id != ?
+                  AND tc.term_id NOT IN (SELECT term_id FROM direct)
+                GROUP BY tc.term_id
+                ORDER BY source_count DESC, tc.term_id ASC
+                LIMIT ?
+                """,
+                (term_id, term_id, current_context_id, term_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _fetch_domain_recommendations(
+        self,
+        *,
+        term_id: int,
+        domain: str,
+        limit: int,
+    ) -> list[dict[str, object]]:
+        """同领域高价值（收藏/出现次数）但未与目标术语共现的术语。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                WITH direct AS (
+                    SELECT DISTINCT tc.term_id
+                    FROM term_captures tc
+                    WHERE tc.capture_id IN (
+                        SELECT capture_id FROM term_captures WHERE term_id = ?
+                    )
+                      AND tc.term_id != ?
+                )
+                SELECT t.id AS term_id
+                FROM terms t
+                WHERE t.domain = ?
+                  AND t.id != ?
+                  AND t.id NOT IN (SELECT term_id FROM direct)
+                ORDER BY t.favorite DESC, t.occurrences DESC, t.id ASC
+                LIMIT ?
+                """,
+                (term_id, term_id, domain, term_id, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def _fetch_term_domain_counts(
         self,
         *,

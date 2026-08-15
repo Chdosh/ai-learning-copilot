@@ -18,10 +18,10 @@
   - [x] `RelatedTermQuery / RelatedTermItem / RelatedTermPage` 契约 + `query_related_terms`：基于现有 `term_captures` 单次 SQL 动态计算同 capture 共现，不新增 `term_pairs`
   - [x] 展示相关术语、共同来源数、共同方向（shared_domains）和可理解理由（`共同出现在 N 条学习记录`、`同属 X 领域`）；排序共享数降序 + term.id 稳定键
   - [x] 学习页积累项行内"相关知识"惰性展开面板（点击查询、可收起、无 N+1）；8 项契约测试 + 学习页展开/收起 UI 测试
-- [ ] **P1.5-D 带理由的延伸推荐**
-  - [ ] 候选先来自共同来源、同方向、同领域和现有 learning tip
-  - [ ] 每条推荐必须说明理由并允许忽略
-  - [ ] 本阶段不接 embedding，不自动写入正式术语
+- [x] **P1.5-D 带理由的延伸推荐**
+  - [x] `RecommendationQuery / RecommendationItem / RecommendationPage` 契约 + `query_recommendations`：候选只来自真实事实——bridge（二阶共同来源，排除直接共现）/ direction（同学习方向未共现）/ domain（同领域高价值未共现）/ tip（同领域 pending 学习建议）
+  - [x] 每条推荐带可理解理由，按证据强度排序（bridge > direction > domain > tip）；不接 embedding、不写入正式术语
+  - [x] 允许忽略且持久生效：术语忽略存 settings 键、建议忽略复用 tips 状态流转；学习页展开面板内展示推荐 + 忽略按钮；10 项契约测试 + UI 忽略交互测试
 
 ## 已完成基础
 

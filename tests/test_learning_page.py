@@ -159,6 +159,89 @@ def test_learning_page_related_terms_expand_and_collapse(tmp_path) -> None:
     app.processEvents()
 
 
+def test_learning_page_recommendations_render_and_ignore(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store, service, kb, page = _page(tmp_path)
+    first = store.save_capture(
+        image_path="",
+        source_text="termA with termB",
+        translation="",
+        explanation="",
+        domain="AI概念",
+    )
+    second = store.save_capture(
+        image_path="",
+        source_text="termB with termC",
+        translation="",
+        explanation="",
+        domain="AI概念",
+    )
+    kb.ingest(
+        KnowledgeIngest(
+            capture_id=first,
+            terms=[
+                {"term": "termA", "chinese_name": "甲", "domain": "AI概念"},
+                {"term": "termB", "chinese_name": "乙", "domain": "AI概念"},
+            ],
+            domain="AI概念",
+        )
+    )
+    kb.ingest(
+        KnowledgeIngest(
+            capture_id=second,
+            terms=[
+                {"term": "termB", "chinese_name": "乙", "domain": "AI概念"},
+                {"term": "termC", "chinese_name": "丙", "domain": "AI概念"},
+            ],
+            domain="AI概念",
+        )
+    )
+
+    page.show()
+    page.refresh()
+    app.processEvents()
+
+    # termA 行展开：推荐区出现二阶推荐 termC
+    terma_button = next(
+        button
+        for button in page.accumulation_list.findChildren(QPushButton)
+        if button.property("related") is True
+        and button.parentWidget() is not None
+        and "termA" in button.parentWidget().findChildren(QLabel)[0].text()
+    )
+    terma_button.click()
+    app.processEvents()
+
+    visible_labels = [
+        label.text()
+        for label in page.accumulation_list.findChildren(QLabel)
+        if label.isVisible()
+    ]
+    assert any(
+        "termC" in text and "通过" in text and "termB" in text
+        for text in visible_labels
+    )
+
+    ignore_buttons = [
+        button
+        for button in page.accumulation_list.findChildren(QPushButton)
+        if button.property("recommendation_ignore") is True
+    ]
+    assert ignore_buttons
+    ignore_buttons[0].click()
+    app.processEvents()
+    # 忽略后该推荐行立即消失
+    remaining = [
+        button
+        for button in page.accumulation_list.findChildren(QPushButton)
+        if button.property("recommendation_ignore") is True
+        and button.isVisible()
+    ]
+    assert len(remaining) == len(ignore_buttons) - 1
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_learning_page_shows_due_review_count(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store, service, kb, page = _page(tmp_path)

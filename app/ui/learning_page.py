@@ -27,6 +27,7 @@ from app.services.knowledge_base import (
     AccumulationItem,
     AccumulationQuery,
     KnowledgeBase,
+    RecommendationQuery,
     RelatedTermQuery,
     TipQuery,
 )
@@ -294,10 +295,79 @@ class LearningPage(QWidget):
                 )
                 empty.setWordWrap(True)
                 layout.addWidget(empty)
+            self._build_recommendation_section(layout, item, current_context_id, effective_domain)
             panel.setProperty("loaded", True)
         visible = not panel.isVisible()
         panel.setVisible(visible)
         button.setText("收起相关知识" if visible else "相关知识")
+
+    def _build_recommendation_section(
+        self,
+        layout,
+        item: AccumulationItem,
+        current_context_id: int | None,
+        effective_domain: str,
+    ) -> None:
+        """延伸推荐（P1.5-D）：只认真实来源事实，每条可忽略（持久生效）。"""
+        page = self.knowledge_base.query_recommendations(
+            RecommendationQuery(
+                term_id=item.term.id,
+                limit=5,
+                current_context_id=current_context_id,
+                effective_domain=effective_domain,
+            )
+        )
+        title = QLabel("延伸推荐")
+        title.setStyleSheet(
+            f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent; "
+            "margin-top: 4px;"
+        )
+        layout.addWidget(title)
+        if not page.items:
+            empty = QLabel("暂无延伸推荐")
+            empty.setStyleSheet(
+                f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;"
+            )
+            layout.addWidget(empty)
+            return
+        for recommendation in page.items:
+            row = QWidget()
+            row.setStyleSheet("background: transparent;")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            if recommendation.term is not None:
+                names = [
+                    recommendation.term.term.strip(),
+                    recommendation.term.chinese_name.strip(),
+                ]
+                text = " · ".join(name for name in names if name)
+            else:
+                text = "学习建议"
+            label = QLabel(f"{text}　—　{recommendation.reason}")
+            label.setStyleSheet(
+                f"color: {TEXT_SECONDARY}; font-size: 12px; background: transparent;"
+            )
+            label.setWordWrap(True)
+            row_layout.addWidget(label, 1)
+            ignore_button = QPushButton("忽略")
+            ignore_button.setProperty("recommendation_ignore", True)
+            ignore_button.setStyleSheet(button_qss())
+            ignore_button.clicked.connect(
+                lambda checked=False, r=row, rec=recommendation: (
+                    self._ignore_recommendation_row(r, rec)
+                )
+            )
+            row_layout.addWidget(ignore_button)
+            layout.addWidget(row)
+
+    def _ignore_recommendation_row(self, row: QWidget, recommendation) -> None:
+        self.knowledge_base.ignore_recommendation(
+            term_id=recommendation.term.id if recommendation.term is not None else None,
+            tip_id=recommendation.tip_id,
+        )
+        row.setVisible(False)
+        row.deleteLater()
 
     # ---- 今日复习 ----
 
