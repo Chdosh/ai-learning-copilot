@@ -122,15 +122,22 @@ class LearningPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        centered = QWidget()
+        centered_layout = QHBoxLayout(centered)
+        centered_layout.setContentsMargins(20, 16, 20, 16)
+        centered_layout.addStretch(1)
         content = QWidget()
+        content.setMaximumWidth(640)
+        centered_layout.addWidget(content)
+        centered_layout.addStretch(1)
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         layout.addWidget(self._build_review_card())
         layout.addWidget(self._build_tips_card())
         layout.addWidget(self._build_digest_card())
         layout.addStretch(1)
-        scroll.setWidget(content)
+        scroll.setWidget(centered)
         outer.addWidget(scroll)
 
     def _build_card(self) -> QFrame:
@@ -210,7 +217,9 @@ class LearningPage(QWidget):
                 widget.deleteLater()
         if not tips:
             empty = QLabel("暂无学习建议。截图解释给出的建议会自动沉淀到这里。")
-            empty.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+            empty.setStyleSheet(
+                f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;"
+            )
             empty.setWordWrap(True)
             self.tips_list_layout.addWidget(empty)
             return
@@ -219,8 +228,10 @@ class LearningPage(QWidget):
 
     def _build_tip_row(self, tip: LearningTip) -> QWidget:
         row = QFrame()
+        row.setObjectName("tipRow")
         row.setStyleSheet(
-            f"QFrame {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: {RADIUS_MD}; }}"
+            f"QFrame#tipRow {{ background: {CARD}; border: 1px solid {BORDER}; "
+            f"border-radius: {RADIUS_MD}; }}"
         )
         box = QVBoxLayout(row)
         box.setContentsMargins(10, 8, 10, 8)
@@ -228,13 +239,15 @@ class LearningPage(QWidget):
 
         content = QLabel(tip.content)
         content.setWordWrap(True)
-        content.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        content.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 13px; background: transparent;"
+        )
         box.addWidget(content)
 
         meta_row = QHBoxLayout()
         meta_row.setSpacing(6)
         meta = QLabel(f"{tip.domain or '通用'} · {tip.created_at.replace('T', ' ')[:16]}")
-        meta.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        meta.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;")
         meta_row.addWidget(meta)
         meta_row.addStretch(1)
         if tip.status == "pending":

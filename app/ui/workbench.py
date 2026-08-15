@@ -16,7 +16,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -189,6 +189,19 @@ class DirectionAnalysisPreviewDialog(QDialog):
         return self._apply_requested
 
 
+_ROW_BUTTON_QSS = f"""
+QPushButton {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_MD};
+    padding: 3px 10px;
+    color: {TEXT_SECONDARY};
+}}
+QPushButton:hover {{ border-color: {PRIMARY}; color: {PRIMARY}; }}
+QPushButton:pressed {{ background: {PRIMARY_SOFT}; }}
+"""
+
+
 class WorkbenchPage(QWidget):
     context_changed = Signal(object)
 
@@ -212,10 +225,17 @@ class WorkbenchPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        centered = QWidget()
+        centered_layout = QHBoxLayout(centered)
+        centered_layout.setContentsMargins(20, 16, 20, 16)
+        centered_layout.addStretch(1)
         content = QWidget()
-        columns = QHBoxLayout(content)
-        columns.setContentsMargins(20, 16, 20, 16)
-        columns.setSpacing(14)
+        content.setMaximumWidth(640)
+        centered_layout.addWidget(content)
+        centered_layout.addStretch(1)
+        columns = QVBoxLayout(content)
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.setSpacing(12)
 
         card = self._build_card()
         card_layout = QVBoxLayout(card)
@@ -246,9 +266,11 @@ class WorkbenchPage(QWidget):
         domain_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
         domain_layout.addWidget(domain_title)
         self.domain_combo = self._build_editable_combo(PRESET_DOMAINS, "领域可直接输入自定义值")
+        self.domain_combo.setMaximumWidth(220)
         self.domain_combo.currentTextChanged.connect(self._on_form_edited)
         domain_layout.addWidget(self.domain_combo)
-        form_row.addWidget(domain_column, 1)
+        form_row.addWidget(domain_column)
+        form_row.addStretch(1)
 
         scene_column = QWidget()
         scene_layout = QVBoxLayout(scene_column)
@@ -258,9 +280,10 @@ class WorkbenchPage(QWidget):
         scene_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
         scene_layout.addWidget(scene_title)
         self.scene_combo = self._build_editable_combo(PRESET_SCENES, "场景可直接输入自定义值")
+        self.scene_combo.setMaximumWidth(220)
         self.scene_combo.currentTextChanged.connect(self._on_form_edited)
         scene_layout.addWidget(self.scene_combo)
-        form_row.addWidget(scene_column, 1)
+        form_row.addWidget(scene_column)
         card_layout.addLayout(form_row)
 
         self.advanced_toggle = QPushButton("高级选项")
@@ -415,7 +438,7 @@ class WorkbenchPage(QWidget):
         card_layout.addLayout(repair_row)
 
         columns.addWidget(card, 1)
-        scroll.setWidget(content)
+        scroll.setWidget(centered)
         outer.addWidget(scroll)
 
     def _build_card(self) -> QFrame:
@@ -701,7 +724,7 @@ class WorkbenchPage(QWidget):
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, record.id)
             row_widget = self._build_direction_row(display, record, record.id == current_id)
-            item.setSizeHint(row_widget.sizeHint())
+            item.setSizeHint(QSize(0, 34))
             self.direction_list.addItem(item)
             self.direction_list.setItemWidget(item, row_widget)
 
@@ -712,12 +735,14 @@ class WorkbenchPage(QWidget):
         is_current: bool,
     ) -> QWidget:
         row = QWidget()
+        row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row.setStyleSheet("background: transparent;")
         layout = QHBoxLayout(row)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(8)
+        layout.setContentsMargins(6, 3, 6, 3)
+        layout.setSpacing(6)
 
         name_label = QLabel(display)
-        name_label.setStyleSheet(f"color: {TEXT}; font-size: 13px;")
+        name_label.setStyleSheet(f"color: {TEXT}; font-size: 13px; background: transparent;")
         layout.addWidget(name_label, 1)
 
         if is_current:
@@ -729,21 +754,21 @@ class WorkbenchPage(QWidget):
             layout.addWidget(badge)
 
         use_button = QPushButton("使用")
-        use_button.setStyleSheet(button_qss())
+        use_button.setStyleSheet(_ROW_BUTTON_QSS)
         use_button.clicked.connect(
             lambda checked=False, cid=record.id: self._switch_to(cid)
         )
         layout.addWidget(use_button)
 
         edit_button = QPushButton("编辑")
-        edit_button.setStyleSheet(button_qss())
+        edit_button.setStyleSheet(_ROW_BUTTON_QSS)
         edit_button.clicked.connect(
             lambda checked=False, cid=record.id: self._edit_direction(cid)
         )
         layout.addWidget(edit_button)
 
         delete_button = QPushButton("删除")
-        delete_button.setStyleSheet(button_qss())
+        delete_button.setStyleSheet(_ROW_BUTTON_QSS)
         delete_button.clicked.connect(
             lambda checked=False, cid=record.id: self._delete_direction(cid)
         )
