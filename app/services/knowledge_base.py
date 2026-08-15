@@ -65,6 +65,48 @@ class TermPage:
     domain_counts: list[tuple[str, int]]
 
 
+# ---------------------------------------------------------------------------
+# P1.5 学习页知识积累：契约（docs/personal_knowledge_base_plan.md §7.3 P1.5-A）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class AccumulationQuery:
+    """一次"刷新学习页积累"的查询请求。
+
+    - 最近积累必须按真实 capture 时间排序，禁止用术语表更新时间猜测；
+    - 当前方向事实由调用方传入，KnowledgeBase 不读取 UI 设置。
+    """
+
+    limit: int = 20
+    current_context_id: int | None = None
+    effective_domain: str = "通用"
+
+
+@dataclass(slots=True)
+class AccumulationItem:
+    """一条最近积累：术语 + 真实来源事实 + 展示理由。
+
+    不变量（P1.5-B 实现时必须满足，测试已锁定）：
+    - ``latest_capture_id`` 指向真实存在、未删除的 capture，可回看；
+    - ``latest_capture_at`` 是该术语所有来源 capture 中最新的创建时间；
+    - ``source_count`` 按不同 capture 计数；同 capture 的重试/追问不虚增；
+    - 术语的所有来源 capture 被删除后，该积累项必须消失。
+    """
+
+    term: TermRecord
+    latest_capture_id: int
+    latest_capture_at: str
+    latest_capture_title: str
+    source_count: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class AccumulationPage:
+    items: list[AccumulationItem]
+
+
 # 排序封顶常量：高频只证明“多次出现”，不能无限放大价值（方案 §6.6）。
 # 私有常量，由排序契约测试固定，不属于外部 interface。
 _SORT_SOURCE_CAP = 5
@@ -168,6 +210,20 @@ class KnowledgeBase:
             fold_basic=fold_basic,
         )
         return TermPage(items=items, total=total, domain_counts=domain_counts)
+
+    def query_accumulation(self, query: AccumulationQuery) -> AccumulationPage:
+        """一次请求返回学习页"最近积累"完整数据（方案 §7.3 P1.5-A/B）。
+
+        契约要点：
+        - 积累事件 = 术语通过 capture 进入知识库（term_captures），
+          排序键 = 该术语最新的真实 capture 时间；
+        - 同 capture 的重试 / 追问不产生新的积累项，也不虚增来源数；
+        - 每条积累附最近来源（可回看）与展示理由；
+        - 理由格式由 P1.5-A 测试冻结：来源证据 + 当前方向事实。
+        """
+        if query.limit <= 0:
+            raise ValueError("limit 必须大于 0")
+        raise NotImplementedError("P1.5-B 实现积累聚合查询")
 
     @staticmethod
     def _direction_level(aggregate: TermAggregate, effective_domain: str) -> int:
