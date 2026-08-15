@@ -52,6 +52,7 @@ from app.services.ocr import OCRService
 from app.services.screenshot import ScreenshotError, take_screenshots
 from app.services.hotkey import HotkeyManager
 from app.services.settings import AppSettings, SettingsService
+from app.ui.learning_page import LearningPage
 from app.ui.overview import OverviewPage
 from app.ui.result_window import ResultWindow
 from app.ui.review import ReviewDialog
@@ -640,11 +641,16 @@ class MainWindow(QMainWindow):
         self.nav_buttons: list[QPushButton] = []
         self.pages = QStackedWidget()
         self.overview_page = OverviewPage(self.history_store, self.settings_service)
-        self.workbench_page = WorkbenchPage(self.history_store, self.settings_service, self.knowledge_base)
+        self.learning_page = LearningPage(
+            self.history_store, self.settings_service, self.knowledge_base
+        )
+        self.learning_page.context_changed.connect(self._on_context_changed)
+        self.workbench_page = WorkbenchPage(self.history_store, self.settings_service)
         self.workbench_page.context_changed.connect(self._on_context_changed)
         self._add_page(sidebar_layout, "获取", self.overview_page)
-        self._add_page(sidebar_layout, "工作台", self.workbench_page)
+        self._add_page(sidebar_layout, "学习", self.learning_page)
         self._add_page(sidebar_layout, "术语本", self._build_terms_page())
+        self._add_page(sidebar_layout, "工作台", self.workbench_page)
         self._add_page(sidebar_layout, "设置", self._build_settings_page())
         self.capture_sidebar_button = _primary_button("按下截图")
         self.capture_sidebar_button.setFixedHeight(32)
@@ -784,8 +790,8 @@ class MainWindow(QMainWindow):
         if index == 0:
             self.overview_page.refresh()
         elif index == 1:
-            self.workbench_page.refresh_tips()
-        elif index == 3:
+            self.learning_page.refresh()
+        elif index == 4:
             self.refresh_ocr_status()
 
     def _build_terms_page(self) -> QWidget:
@@ -1497,6 +1503,7 @@ class MainWindow(QMainWindow):
         self.settings = self.settings_service.load()
         self.workbench_page.refresh_directions()
         self.overview_page.refresh_direction_label()
+        self.learning_page.refresh()
         self.refresh_terms()
         self.status_label.setText(f"当前学习方向：{self._current_context_name()}")
 
@@ -1714,6 +1721,7 @@ class MainWindow(QMainWindow):
         self._last_payload = payload
         self.result_window.set_result(payload)
         self.overview_page.refresh()
+        self.learning_page.refresh()
         self.refresh_terms()
         self._refresh_sidebar_stats()
         self.status_label.setText("截图翻译已完成并保存。")
@@ -1744,6 +1752,7 @@ class MainWindow(QMainWindow):
         self._last_payload.update(payload)
         self.result_window.append_followup_result(payload)
         self.refresh_terms()
+        self.learning_page.refresh()
         self.overview_page.refresh()
         self.status_label.setText("追问完成。")
 
