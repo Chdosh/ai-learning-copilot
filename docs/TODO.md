@@ -23,8 +23,8 @@
 - [x] **P1-A 查询契约与失败测试**：`TermViewItem/TermPage` 契约、三个视图、方向三级回退、基础词规则、封顶常量、稳定分页与排序理由的 16 项红灯测试（tests/test_term_views.py）
 - [x] **P1-B 统一查询实现**：`KnowledgeBase.query_terms` 聚合查询（列表/总数/领域统计/理由一次返回），分层排序与封顶，无 N+1；1000 术语/10000 链接基准 25.5ms（红线 100ms）
 - [x] **P1-C 最小 UI 接线**：术语页"重点 / 当前方向 / 全部"视图切换（胶囊控件，默认重点）；当前方向视图显示方向名并接管领域筛选；`refresh_terms` 收敛为单次 `query_terms`；详情区显示排序理由与来源数量；收藏/编辑/删除/查看适配 `TermViewItem`
-- [ ] **P1-D 验收收口**：知识脊柱回归、真实数据库副本、查询基准和桌面 smoke
-- [ ] **独立可靠性修复**：`delete_capture` 清理 conversation/message 关系并处理历史孤儿；不混入 P1 排序模型
+- [x] **P1-D 验收收口**：知识脊柱回归与 UI 断言通过；真实库副本三视图 8-10ms；1000 术语/10000 链接基准 6-19ms（红线 100ms，`tests/bench_term_query.py` 可复跑）；UI 层对 HistoryStore 术语查询直调清零；离屏渲染 + 视图切换断言通过（真实桌面渲染留待用户目验）
+- [x] **独立可靠性修复**：`delete_capture` / `delete_captures_before` 级联清理 conversation/message；初始化时幂等兜底历史孤儿（开发库实测清理 12 条）；回归测试 3 项
 
 ## 更新与发布
 

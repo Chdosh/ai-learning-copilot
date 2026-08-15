@@ -242,3 +242,67 @@ def test_upsert_respects_per_term_domain(tmp_path: Path) -> None:
     )
     terms = {term.domain: term.chinese_name for term in store.list_terms()}
     assert terms == {"编程": "向量", "生物": "载体"}
+
+
+# ---------------------------------------------------------------------------
+# 可靠性修复：删除 capture 时级联清理 conversation/message，兜底历史孤儿
+# ---------------------------------------------------------------------------
+
+
+def _capture_with_conversation(store: HistoryStore) -> tuple[int, int]:
+    capture_id = store.save_capture(
+        image_path="/tmp/test.png",
+        source_text="test source",
+        translation="测试",
+        explanation="解释",
+    )
+    conv_id = store.create_conversation(capture_id, title="test")
+    store.add_message(conv_id, "user", "question", mode="custom")
+    store.add_message(conv_id, "assistant", '{"answer": "ok"}', mode="custom")
+    return capture_id, conv_id
+
+
+def test_delete_capture_cascades_conversation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    capture_id, conv_id = _capture_with_conversation(store)
+    assert store.list_messages(conv_id)
+
+    store.delete_capture(capture_id)
+    assert store.get_conversation_id_for_capture(capture_id) is None
+    assert store.list_messages(conv_id) == []
+
+
+def test_delete_captures_before_cascades_conversation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    capture_id, conv_id = _capture_with_conversation(store)
+
+    count = store.delete_captures_before("2099-01-01")
+    assert count == 1
+    assert store.list_messages(conv_id) == []
+    assert store.get_conversation_id_for_capture(capture_id) is None
+
+
+def test_initialize_cleans_historical_orphans(tmp_path: Path) -> None:
+    import sqlite3
+
+    store = _store(tmp_path)
+    capture_id, conv_id = _capture_with_conversation(store)
+    # 模拟旧版本行为：绕过级联直接删 capture，留下孤儿 conversation/message
+    conn = sqlite3.connect(store.db_path)
+    conn.execute("DELETE FROM captures WHERE id = ?", (capture_id,))
+    conn.commit()
+    conn.close()
+
+    # 重新初始化触发兜底清理（幂等）
+    reopened = HistoryStore(db_path=store.db_path)
+    assert reopened.list_messages(conv_id) == []
+    conn = sqlite3.connect(store.db_path)
+    orphan_convs = conn.execute(
+        "SELECT COUNT(*) FROM conversations WHERE capture_id NOT IN (SELECT id FROM captures)"
+    ).fetchone()[0]
+    orphan_messages = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id NOT IN (SELECT id FROM conversations)"
+    ).fetchone()[0]
+    conn.close()
+    assert orphan_convs == 0
+    assert orphan_messages == 0

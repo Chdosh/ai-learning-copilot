@@ -381,6 +381,17 @@ class HistoryStore:
                 conn.execute("ALTER TABLE captures ADD COLUMN context_id INTEGER")
         except sqlite3.Error:
             pass
+        # 可靠性修复：清理旧版本删除 capture 遗留的 conversation/message 孤儿
+        # （幂等：新删除路径已级联清理，此处只兜底历史残留）
+        try:
+            conn.execute(
+                "DELETE FROM conversations WHERE capture_id NOT IN (SELECT id FROM captures)"
+            )
+            conn.execute(
+                "DELETE FROM messages WHERE conversation_id NOT IN (SELECT id FROM conversations)"
+            )
+        except sqlite3.Error:
+            pass
 
     def save_capture(
         self,
@@ -1005,6 +1016,14 @@ class HistoryStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM term_captures WHERE capture_id = ?", (capture_id,))
             conn.execute("DELETE FROM learning_tips WHERE capture_id = ?", (capture_id,))
+            conn.execute(
+                """
+                DELETE FROM messages
+                WHERE conversation_id IN (SELECT id FROM conversations WHERE capture_id = ?)
+                """,
+                (capture_id,),
+            )
+            conn.execute("DELETE FROM conversations WHERE capture_id = ?", (capture_id,))
             conn.execute("DELETE FROM captures WHERE id = ?", (capture_id,))
 
     def delete_captures_before(self, before_date: str) -> int:
@@ -1019,6 +1038,24 @@ class HistoryStore:
             conn.execute(
                 """
                 DELETE FROM learning_tips
+                WHERE capture_id IN (SELECT id FROM captures WHERE created_at < ?)
+                """,
+                (before_date,),
+            )
+            conn.execute(
+                """
+                DELETE FROM messages
+                WHERE conversation_id IN (
+                    SELECT c.id FROM conversations c
+                    JOIN captures cap ON cap.id = c.capture_id
+                    WHERE cap.created_at < ?
+                )
+                """,
+                (before_date,),
+            )
+            conn.execute(
+                """
+                DELETE FROM conversations
                 WHERE capture_id IN (SELECT id FROM captures WHERE created_at < ?)
                 """,
                 (before_date,),
