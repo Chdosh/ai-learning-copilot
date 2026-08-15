@@ -438,14 +438,22 @@ class HistoryStore:
         tags: list[str] | None = None,
         category: str = "",
         domain: str | None = None,
+        context_id: int | None = None,
+        replace_context: bool = False,
     ) -> bool:
-        """Update an existing capture's AI result fields, keeping created_at/image_path."""
+        """Update an existing capture's AI result fields, keeping created_at/image_path.
+
+        replace_context is explicit because ordinary metadata updates must
+        preserve the direction fact, while a user-initiated retry runs under
+        the direction that is active for the replacement AI result.
+        """
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 UPDATE captures
                 SET translation = ?, explanation = ?, tags = ?, category = ?,
-                    domain = COALESCE(?, domain)
+                    domain = COALESCE(?, domain),
+                    context_id = CASE WHEN ? THEN ? ELSE context_id END
                 WHERE id = ?
                 """,
                 (
@@ -454,6 +462,8 @@ class HistoryStore:
                     json.dumps(tags or [], ensure_ascii=False),
                     category,
                     domain,
+                    1 if replace_context else 0,
+                    context_id,
                     capture_id,
                 ),
             )

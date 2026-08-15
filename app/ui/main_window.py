@@ -791,6 +791,8 @@ class MainWindow(QMainWindow):
             self.overview_page.refresh()
         elif index == 1:
             self.learning_page.refresh()
+        elif index == 2:
+            self.refresh_terms()
         elif index == 4:
             self.refresh_ocr_status()
 

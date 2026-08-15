@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from app.services.history_store import HistoryStore
-from app.services.knowledge_base import KnowledgeBase
+from app.services.knowledge_base import KnowledgeBase, SaveTermCommand
 from app.services.settings import SettingsService
 from app.ui.main_window import MainWindow
 from app.ui.overview import OverviewPage
@@ -624,6 +624,36 @@ def test_sidebar_navigation_order_and_screenshot_action(tmp_path, monkeypatch) -
 
     capture_button.click()
     assert started == [True]
+    window.close()
+    app.processEvents()
+
+
+def test_terms_page_refreshes_after_review_from_learning_page(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = HistoryStore(tmp_path / "app.db")
+    knowledge_base = KnowledgeBase(store)
+    term = knowledge_base.save_term(SaveTermCommand(term="SVD"))
+    knowledge_base.set_favorite(term.id, favorite=True)
+
+    monkeypatch.setattr(main_window_module, "HistoryStore", lambda: store)
+    monkeypatch.setattr(main_window_module, "ensure_app_dirs", lambda: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_build_tray", lambda self: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_start_hotkey", lambda self: None)
+
+    window = main_window_module.MainWindow()
+    assert window.terms_review_button.text() == "今日复习 (1)"
+
+    def review_once(dialog):
+        dialog.knowledge_base.review(term.id, 2)
+        return 0
+
+    monkeypatch.setattr("app.ui.learning_page.ReviewDialog.exec", review_once)
+    window.learning_page._open_review()
+    assert knowledge_base.count_due_terms() == 0
+
+    window._switch_page(2)
+    assert window.terms_review_button.text() == "今日复习"
+
     window.close()
     app.processEvents()
 

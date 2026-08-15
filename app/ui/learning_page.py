@@ -161,7 +161,8 @@ class LearningPage(QWidget):
     def refresh_tips(self) -> None:
         scope = "pending"
         if hasattr(self, "tips_scope_combo"):
-            scope = str(self.tips_scope_combo.currentData() or "pending")
+            selected_scope = self.tips_scope_combo.currentData()
+            scope = "pending" if selected_scope is None else str(selected_scope)
         tips = self.knowledge_base.list_tips(TipQuery(status=scope, limit=60))
         while self.tips_list_layout.count():
             item = self.tips_list_layout.takeAt(0)

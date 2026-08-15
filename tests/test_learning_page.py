@@ -1,11 +1,11 @@
-"""学习页（知识资产行动入口）测试：今日复习、学习建议清单、自沉淀。"""
+"""学习页（知识资产行动入口）测试：今日复习与学习建议清单。"""
 from __future__ import annotations
 
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from app.services.history_store import HistoryStore
 from app.services.knowledge_base import (
@@ -84,6 +84,47 @@ def test_learning_page_tips_lifecycle(tmp_path) -> None:
     assert kb.count_tips("pending") == 0
     assert kb.count_tips("done") == 1
     assert _tip_buttons(page) == []  # 已完成的建议不再有操作按钮
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_learning_page_all_tips_includes_non_pending_items(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store, service, kb, page = _page(tmp_path)
+
+    for source, tip in (
+        ("first", "pending-tip"),
+        ("second", "done-tip"),
+    ):
+        capture_id = store.save_capture(
+            image_path="",
+            source_text=source,
+            translation="test",
+            explanation="explanation",
+        )
+        kb.ingest(
+            KnowledgeIngest(
+                capture_id=capture_id,
+                terms=[],
+                learning_tip=tip,
+                domain="AI",
+            )
+        )
+
+    done_tip = next(
+        tip
+        for tip in kb.list_tips(TipQuery(status="pending"))
+        if tip.content == "done-tip"
+    )
+    kb.set_tip_status(done_tip.id, "done")
+
+    page.tips_scope_combo.setCurrentIndex(page.tips_scope_combo.findData(""))
+    visible_text = "\n".join(
+        label.text() for label in page.tips_list.findChildren(QLabel)
+    )
+    assert "pending-tip" in visible_text
+    assert "done-tip" in visible_text
+
     page.deleteLater()
     app.processEvents()
 

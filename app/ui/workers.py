@@ -280,6 +280,9 @@ class CaptureStreamWorker(QThread):
             "current_domain": configured_domain,
             "conflict": direction_conflict,
         }
+        active_context_id = _resolve_custom_context_id(
+            self.settings, self.history_store
+        )
         if self.capture_id is not None:
             self.history_store.update_capture(
                 self.capture_id,
@@ -288,6 +291,8 @@ class CaptureStreamWorker(QThread):
                 tags=result.tags,
                 category=category,
                 domain=domain,
+                context_id=active_context_id,
+                replace_context=True,
             )
             conversation_id = self.history_store.get_conversation_id_for_capture(
                 self.capture_id
@@ -302,7 +307,7 @@ class CaptureStreamWorker(QThread):
                 tags=result.tags,
                 category=category,
                 domain=domain,
-                context_id=_resolve_custom_context_id(self.settings, self.history_store),
+                context_id=active_context_id,
             )
             conversation_id = self.history_store.create_conversation(
                 capture_id=capture_id,
@@ -318,7 +323,7 @@ class CaptureStreamWorker(QThread):
                 learning_tip=result.learning_tip,
                 tip_type="followup",
                 domain=domain,
-                context_id=_resolve_custom_context_id(self.settings, self.history_store),
+                context_id=active_context_id,
             )
         )
         if not failed and conversation_id:
