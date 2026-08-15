@@ -645,6 +645,7 @@ class MainWindow(QMainWindow):
             self.history_store, self.settings_service, self.knowledge_base
         )
         self.learning_page.context_changed.connect(self._on_context_changed)
+        self.learning_page.capture_selected.connect(self._open_capture)
         self.workbench_page = WorkbenchPage(self.history_store, self.settings_service)
         self.workbench_page.context_changed.connect(self._on_context_changed)
         self._add_page(sidebar_layout, "获取", self.overview_page)
@@ -1828,8 +1829,11 @@ class MainWindow(QMainWindow):
         capture_id = item.data(Qt.ItemDataRole.UserRole)
         if capture_id is None:
             return
+        self._open_capture(int(capture_id))
+
+    def _open_capture(self, capture_id: int) -> None:
         self._switch_page(0)
-        self.overview_page.select_capture(int(capture_id))
+        self.overview_page.select_capture(capture_id)
 
     def _open_review(self) -> None:
         dialog = ReviewDialog(self.knowledge_base, self)

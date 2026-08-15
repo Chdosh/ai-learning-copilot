@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.services.history_store import (
+    AccumulationAggregate,
     CaptureRecord,
     HistoryStore,
     LearningTip,
@@ -223,7 +224,45 @@ class KnowledgeBase:
         """
         if query.limit <= 0:
             raise ValueError("limit 必须大于 0")
-        raise NotImplementedError("P1.5-B 实现积累聚合查询")
+        aggregates = self.store._fetch_accumulation_aggregates(
+            current_context_id=query.current_context_id,
+            limit=query.limit,
+        )
+        return AccumulationPage(
+            items=[
+                AccumulationItem(
+                    term=aggregate.term,
+                    latest_capture_id=aggregate.latest_capture_id,
+                    latest_capture_at=aggregate.latest_capture_at,
+                    latest_capture_title=aggregate.latest_capture_title,
+                    source_count=aggregate.source_count,
+                    reasons=self._build_accumulation_reasons(
+                        aggregate,
+                        current_context_id=query.current_context_id,
+                        effective_domain=query.effective_domain,
+                    ),
+                )
+                for aggregate in aggregates
+            ]
+        )
+
+    @staticmethod
+    def _build_accumulation_reasons(
+        aggregate: AccumulationAggregate,
+        *,
+        current_context_id: int | None,
+        effective_domain: str,
+    ) -> tuple[str, ...]:
+        reasons = [f"来自 {aggregate.source_count} 条学习记录"]
+        if current_context_id is not None and aggregate.exact_count > 0:
+            reasons.append(f"当前方向出现 {aggregate.exact_count} 次")
+        elif (
+            aggregate.term.domain == effective_domain
+            and effective_domain != "通用"
+            and (current_context_id is None or aggregate.other_count == 0)
+        ):
+            reasons.append("与当前方向同领域")
+        return tuple(reasons)
 
     @staticmethod
     def _direction_level(aggregate: TermAggregate, effective_domain: str) -> int:

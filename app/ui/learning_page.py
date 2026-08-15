@@ -1,7 +1,8 @@
 """学习页：个人知识沉淀的行动入口。
 
-承载两个区块（知识资产的 UI 侧）：
+承载三个区块（知识资产的 UI 侧）：
 
+- 知识积累：最近进入知识库的术语、真实来源与方向理由；
 - 今日复习：间隔重复到期队列入口；
 - 学习建议：AI 建议清单，完成 / 忽略状态流转。
 
@@ -22,7 +23,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.services.history_store import HistoryStore, LearningTip
-from app.services.knowledge_base import KnowledgeBase, TipQuery
+from app.services.knowledge_base import (
+    AccumulationItem,
+    AccumulationQuery,
+    KnowledgeBase,
+    TipQuery,
+)
 from app.services.settings import SettingsService
 from app.ui.review import ReviewDialog
 from app.ui.theme import (
@@ -54,6 +60,7 @@ def _card_title(text: str) -> QLabel:
 
 class LearningPage(QWidget):
     context_changed = Signal(object)
+    capture_selected = Signal(int)
 
     def __init__(
         self,
@@ -87,8 +94,13 @@ class LearningPage(QWidget):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
-        layout.addWidget(self._build_review_card())
-        layout.addWidget(self._build_tips_card())
+        self.content_layout = layout
+        self.accumulation_card = self._build_accumulation_card()
+        self.review_card = self._build_review_card()
+        self.tips_card = self._build_tips_card()
+        layout.addWidget(self.accumulation_card)
+        layout.addWidget(self.review_card)
+        layout.addWidget(self.tips_card)
         layout.addStretch(1)
         scroll.setWidget(centered)
         outer.addWidget(scroll)
@@ -102,6 +114,125 @@ class LearningPage(QWidget):
             f"border-radius: {RADIUS_LG}; }}"
         )
         return card
+
+    # ---- 最近知识积累 ----
+
+    def _build_accumulation_card(self) -> QFrame:
+        card = self._build_card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(8)
+        layout.addWidget(_card_title("知识积累"))
+
+        summary = QLabel("最近从截图与追问中进入个人知识库的内容")
+        summary.setStyleSheet(
+            f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        self.accumulation_list = QWidget()
+        self.accumulation_list_layout = QVBoxLayout(self.accumulation_list)
+        self.accumulation_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.accumulation_list_layout.setSpacing(6)
+        layout.addWidget(self.accumulation_list)
+        return card
+
+    def refresh_accumulation(self) -> None:
+        current_context_id, effective_domain = self._current_direction_facts()
+        page = self.knowledge_base.query_accumulation(
+            AccumulationQuery(
+                limit=20,
+                current_context_id=current_context_id,
+                effective_domain=effective_domain,
+            )
+        )
+        while self.accumulation_list_layout.count():
+            item = self.accumulation_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        if not page.items:
+            empty = QLabel("暂无知识积累。完成截图学习后，术语和真实来源会显示在这里。")
+            empty.setStyleSheet(
+                f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;"
+            )
+            empty.setWordWrap(True)
+            self.accumulation_list_layout.addWidget(empty)
+            return
+        for item in page.items:
+            self.accumulation_list_layout.addWidget(self._build_accumulation_row(item))
+
+    def _current_direction_facts(self) -> tuple[int | None, str]:
+        settings = self.settings_service.load()
+        context_id = settings.current_context_id
+        if context_id is not None:
+            context = self.history_store.get_context(context_id)
+            if context is not None and not context.builtin:
+                return context_id, context.domain or "通用"
+        domain, _scene = self.settings_service.get_quick_context()
+        return None, domain or "通用"
+
+    def _build_accumulation_row(self, item: AccumulationItem) -> QWidget:
+        row = QFrame()
+        row.setObjectName("accumulationRow")
+        row.setStyleSheet(
+            f"QFrame#accumulationRow {{ background: {CARD}; border: 1px solid {BORDER}; "
+            f"border-radius: {RADIUS_MD}; }}"
+        )
+        box = QVBoxLayout(row)
+        box.setContentsMargins(10, 9, 10, 9)
+        box.setSpacing(5)
+
+        names = [item.term.term.strip(), item.term.chinese_name.strip()]
+        title = QLabel(" · ".join(name for name in names if name))
+        title.setStyleSheet(
+            f"color: {TEXT}; font-size: 14px; font-weight: 600; background: transparent;"
+        )
+        title.setWordWrap(True)
+        box.addWidget(title)
+
+        explanation_text = item.term.beginner_explanation.strip()
+        if explanation_text:
+            explanation = QLabel(explanation_text)
+            explanation.setStyleSheet(
+                f"color: {TEXT_SECONDARY}; font-size: 13px; background: transparent;"
+            )
+            explanation.setWordWrap(True)
+            box.addWidget(explanation)
+
+        captured_at = item.latest_capture_at.replace("T", " ")[:16]
+        meta = QLabel(
+            f"{item.term.domain or '通用'} · 积累于 {captured_at} · {item.source_count} 条来源"
+        )
+        meta.setStyleSheet(
+            f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;"
+        )
+        box.addWidget(meta)
+
+        reason = QLabel(" · ".join(item.reasons))
+        reason.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: {FONT_MICRO}; background: transparent;"
+        )
+        reason.setWordWrap(True)
+        box.addWidget(reason)
+
+        source_title = " ".join(item.latest_capture_title.split())
+        if len(source_title) > 72:
+            source_title = f"{source_title[:71]}…"
+        source_button = QPushButton(
+            f"来源：{source_title}" if source_title else "查看原学习记录"
+        )
+        source_button.setProperty("capture_id", item.latest_capture_id)
+        source_button.setToolTip("回到这条知识最近出现的学习记录")
+        source_button.setStyleSheet(button_qss())
+        source_button.clicked.connect(
+            lambda checked=False, capture_id=item.latest_capture_id: (
+                self.capture_selected.emit(capture_id)
+            )
+        )
+        box.addWidget(source_button)
+        return row
 
     # ---- 今日复习 ----
 
@@ -227,6 +358,7 @@ class LearningPage(QWidget):
     # ---- 刷新 ----
 
     def refresh(self) -> None:
+        self.refresh_accumulation()
         due = self.knowledge_base.count_due_terms()
         if due > 0:
             self.due_label.setText(f"{due} 个术语待复习")

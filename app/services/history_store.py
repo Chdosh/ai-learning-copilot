@@ -87,6 +87,20 @@ class TermAggregate:
 
 
 @dataclass(slots=True)
+class AccumulationAggregate:
+    """学习页积累的原始来源事实；展示理由由 KnowledgeBase 生成。"""
+
+    term: TermRecord
+    latest_capture_id: int
+    latest_capture_at: str
+    latest_capture_title: str
+    source_count: int
+    exact_count: int
+    other_count: int
+    null_count: int
+
+
+@dataclass(slots=True)
 class ContextRecord:
     id: int
     name: str
@@ -1303,6 +1317,79 @@ class HistoryStore:
                 term=_term_from_row(row),
                 source_count=int(row["source_count"]),
                 latest_source_at=str(row["latest_source_at"] or ""),
+                exact_count=int(row["exact_count"]),
+                other_count=int(row["other_count"]),
+                null_count=int(row["null_count"]),
+            )
+            for row in rows
+        ]
+
+    def _fetch_accumulation_aggregates(
+        self,
+        *,
+        current_context_id: int | None,
+        limit: int,
+    ) -> list[AccumulationAggregate]:
+        """一次 SQL 返回最近积累及其真实来源、方向事实。
+
+        最新来源由 captures.created_at 决定，并用 capture id 作为同秒稳定键；
+        没有仍然存在的 capture 来源的术语不会进入结果。
+        """
+        context_param = current_context_id if current_context_id is not None else -1
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                WITH source_facts AS (
+                    SELECT tc.term_id AS term_id,
+                           COUNT(DISTINCT tc.capture_id) AS source_count,
+                           SUM(CASE WHEN c.context_id = ? THEN 1 ELSE 0 END) AS exact_count,
+                           SUM(
+                               CASE
+                                   WHEN c.context_id IS NOT NULL AND c.context_id != ?
+                                   THEN 1 ELSE 0
+                               END
+                           ) AS other_count,
+                           SUM(CASE WHEN c.context_id IS NULL THEN 1 ELSE 0 END) AS null_count
+                    FROM term_captures tc
+                    JOIN captures c ON c.id = tc.capture_id
+                    GROUP BY tc.term_id
+                ),
+                ranked_sources AS (
+                    SELECT tc.term_id AS term_id,
+                           c.id AS latest_capture_id,
+                           c.created_at AS latest_capture_at,
+                           c.source_text AS latest_capture_title,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY tc.term_id
+                               ORDER BY c.created_at DESC, c.id DESC
+                           ) AS source_rank
+                    FROM term_captures tc
+                    JOIN captures c ON c.id = tc.capture_id
+                )
+                SELECT t.*,
+                       rs.latest_capture_id,
+                       rs.latest_capture_at,
+                       rs.latest_capture_title,
+                       sf.source_count,
+                       sf.exact_count,
+                       sf.other_count,
+                       sf.null_count
+                FROM source_facts sf
+                JOIN ranked_sources rs
+                  ON rs.term_id = sf.term_id AND rs.source_rank = 1
+                JOIN terms t ON t.id = sf.term_id
+                ORDER BY rs.latest_capture_at DESC, rs.latest_capture_id DESC
+                LIMIT ?
+                """,
+                (context_param, context_param, limit),
+            ).fetchall()
+        return [
+            AccumulationAggregate(
+                term=_term_from_row(row),
+                latest_capture_id=int(row["latest_capture_id"]),
+                latest_capture_at=str(row["latest_capture_at"]),
+                latest_capture_title=str(row["latest_capture_title"] or ""),
+                source_count=int(row["source_count"]),
                 exact_count=int(row["exact_count"]),
                 other_count=int(row["other_count"]),
                 null_count=int(row["null_count"]),

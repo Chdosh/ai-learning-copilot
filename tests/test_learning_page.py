@@ -37,6 +37,75 @@ def _tip_buttons(page: LearningPage) -> list[QPushButton]:
     return buttons
 
 
+def _accumulation_source_buttons(page: LearningPage) -> list[QPushButton]:
+    return [
+        button
+        for button in page.accumulation_list.findChildren(QPushButton)
+        if button.property("capture_id") is not None
+    ]
+
+
+def test_learning_page_puts_accumulation_before_review_and_tips(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store, service, kb, page = _page(tmp_path)
+
+    assert page.content_layout.indexOf(page.accumulation_card) == 0
+    assert page.content_layout.indexOf(page.review_card) == 1
+    assert page.content_layout.indexOf(page.tips_card) == 2
+
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_learning_page_renders_recent_accumulation_and_emits_source(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store, service, kb, page = _page(tmp_path)
+    capture_id = store.save_capture(
+        image_path="",
+        source_text="SQL index avoids a full table scan",
+        translation="索引避免全表扫描",
+        explanation="数据库索引说明",
+        domain="数据库",
+    )
+    kb.ingest(
+        KnowledgeIngest(
+            capture_id=capture_id,
+            terms=[
+                {
+                    "term": "Index",
+                    "chinese_name": "索引",
+                    "beginner_explanation": "帮助数据库更快定位数据。",
+                    "domain": "数据库",
+                }
+            ],
+            domain="数据库",
+        )
+    )
+
+    selected: list[int] = []
+    page.capture_selected.connect(selected.append)
+    page.refresh()
+    app.processEvents()
+
+    visible_text = "\n".join(
+        label.text() for label in page.accumulation_list.findChildren(QLabel)
+    )
+    assert "Index · 索引" in visible_text
+    assert "帮助数据库更快定位数据。" in visible_text
+    assert "数据库 · 积累于 " in visible_text
+    assert "1 条来源" in visible_text
+    assert "来自 1 条学习记录" in visible_text
+
+    source_buttons = _accumulation_source_buttons(page)
+    assert len(source_buttons) == 1
+    assert "SQL index avoids a full table scan" in source_buttons[0].text()
+    source_buttons[0].click()
+    assert selected == [capture_id]
+
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_learning_page_shows_due_review_count(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store, service, kb, page = _page(tmp_path)
