@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -27,6 +29,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QStyle,
     QSystemTrayIcon,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -45,6 +48,7 @@ from app.services.hotkey import HotkeyManager
 from app.services.settings import AppSettings, SettingsService
 from app.ui.overview import OverviewPage
 from app.ui.result_window import ResultWindow
+from app.ui.review import ReviewDialog
 from app.ui.theme import (
     APP_STYLE,
     BG,
@@ -338,12 +342,14 @@ class MainWindow(QMainWindow):
             self._terms_page = 0
         self._terms_query = query
 
-        counts = self.history_store.term_domain_counts(query=query)
+        counts = self.history_store.term_domain_counts(query=query, exclude_basic=True)
         if self._terms_domain not in {d for d, _ in counts}:
             self._terms_domain = ""
         domain = self._terms_domain
 
-        self._terms_total = self.history_store.count_terms(query=query, domain=domain)
+        self._terms_total = self.history_store.count_terms(
+            query=query, domain=domain, exclude_basic=True
+        )
         self._terms_pages = max(1, (self._terms_total + TERMS_PAGE_SIZE - 1) // TERMS_PAGE_SIZE)
         self._terms_page = max(0, min(self._terms_page, self._terms_pages - 1))
         terms = self.history_store.list_terms(
@@ -351,6 +357,7 @@ class MainWindow(QMainWindow):
             domain=domain,
             limit=TERMS_PAGE_SIZE,
             offset=self._terms_page * TERMS_PAGE_SIZE,
+            exclude_basic=True,
         )
         self._terms_records = terms
 
@@ -400,6 +407,9 @@ class MainWindow(QMainWindow):
         self.terms_prev_button.setEnabled(self._terms_page > 0)
         self.terms_next_button.setEnabled(self._terms_page < self._terms_pages - 1)
         self._update_terms_hscroll_buttons()
+        if hasattr(self, "terms_review_button"):
+            due = self.history_store.count_due_terms()
+            self.terms_review_button.setText(f"今日复习 ({due})" if due else "今日复习")
         if hasattr(self, "sidebar_stats_value"):
             fav_count = self.history_store.count_favorite_terms()
             self.sidebar_stats_value.setText(
@@ -701,6 +711,8 @@ class MainWindow(QMainWindow):
             button.setChecked(button_index == index)
         if index == 0:
             self.overview_page.refresh()
+        elif index == 1:
+            self.workbench_page.refresh_tips()
         elif index == 3:
             self.refresh_ocr_status()
 
@@ -744,6 +756,12 @@ class MainWindow(QMainWindow):
         self.terms_add_button = _primary_button("新增术语  +")
         self.terms_add_button.clicked.connect(self._add_manual_term)
         table_header_row.addWidget(self.terms_add_button)
+        self.terms_review_button = QPushButton("今日复习")
+        self.terms_review_button.setStyleSheet(button_qss())
+        self.terms_review_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.terms_review_button.setToolTip("复习今天到期的收藏术语（间隔重复）")
+        self.terms_review_button.clicked.connect(self._open_review)
+        table_header_row.addWidget(self.terms_review_button)
         self._sync_terms_search_height()
         table_layout.addLayout(table_header_row)
         self.terms_table = QTableWidget(0, 6)
@@ -791,7 +809,7 @@ class MainWindow(QMainWindow):
         self.terms_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.terms_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.terms_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.terms_table.itemSelectionChanged.connect(self._show_selected_term)
+        self.terms_table.itemSelectionChanged.connect(self._on_term_row_selected)
         table_header = self.terms_table.horizontalHeader()
         table_header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -917,16 +935,41 @@ class MainWindow(QMainWindow):
         detail_layout.addWidget(_field_title("中文名"))
         detail_layout.addWidget(self.term_chinese_label)
 
-        detail_layout.addWidget(_field_title("完整解释"))
+        # design_system 6.3：解释 / 例子互斥阅读用 Tab，节省垂直空间
+        self.term_detail_tabs = QTabWidget()
+        self.term_detail_tabs.setDocumentMode(True)
+        self.term_detail_tabs.setStyleSheet(
+            f"""
+            QTabWidget::pane {{ border: none; }}
+            QTabBar::tab {{ padding: 5px 12px; color: {MUTED}; background: transparent; border: none; }}
+            QTabBar::tab:selected {{ color: {PRIMARY}; border-bottom: 2px solid {PRIMARY}; }}
+            """
+        )
         self.term_explanation_label = _readonly_box("完整解释")
-        detail_layout.addWidget(self.term_explanation_label, 1)
-
-        detail_layout.addWidget(_field_title("当前例子"))
         self.term_example_label = _readonly_box("当前例子")
-        detail_layout.addWidget(self.term_example_label, 1)
+        self.term_detail_tabs.addTab(self.term_explanation_label, "完整解释")
+        self.term_detail_tabs.addTab(self.term_example_label, "当前例子")
+        self.term_detail_tabs.setMinimumHeight(96)
+        detail_layout.addWidget(self.term_detail_tabs, 1)
 
         detail_layout.addWidget(_field_title("出现次数"))
         detail_layout.addWidget(self.term_count_label)
+
+        detail_layout.addWidget(_field_title("出处"))
+        self.term_sources_list = QListWidget()
+        self.term_sources_list.setMaximumHeight(84)
+        self.term_sources_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.term_sources_list.setToolTip("点击可跳转到该术语出现过的学习记录")
+        self.term_sources_list.setStyleSheet(
+            f"""
+            QListWidget {{ background: transparent; border: none; outline: 0; }}
+            QListWidget::item {{ padding: 4px 2px; color: {TEXT_SECONDARY}; }}
+            QListWidget::item:selected {{ background: {PRIMARY_SOFT}; color: {TEXT}; border-radius: 4px; }}
+            """
+        )
+        self.term_sources_list.itemClicked.connect(self._on_term_source_clicked)
+        detail_layout.addWidget(self.term_sources_list)
+
         term_buttons = QHBoxLayout()
         self.favorite_button = _ghost_button("收藏")
         self.favorite_button.clicked.connect(self._toggle_favorite)
@@ -1520,6 +1563,15 @@ class MainWindow(QMainWindow):
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
+        due_count = self.history_store.count_due_terms()
+        if due_count > 0:
+            self.tray.showMessage(
+                "今日复习",
+                f"有 {due_count} 个收藏术语待复习。",
+                QSystemTrayIcon.MessageIcon.Information,
+                6000,
+            )
+
     def _start_hotkey(self) -> None:
         if self.hotkey_manager is not None:
             self.hotkey_manager.stop()
@@ -1561,6 +1613,21 @@ class MainWindow(QMainWindow):
         self._refresh_sidebar_stats()
         self.status_label.setText("截图翻译已完成并保存。")
 
+        hint = payload.get("direction_hint") or {}
+        if hint.get("conflict") and hint.get("detected_domain"):
+            message = (
+                f"这条内容识别为「{hint['detected_domain']}」方向，与当前学习方向不同。"
+                "可在工作台切换方向后重试。"
+            )
+            self.status_label.setText(message)
+            if self.tray is not None:
+                self.tray.showMessage(
+                    "学习方向提示",
+                    message,
+                    QSystemTrayIcon.MessageIcon.Information,
+                    6000,
+                )
+
     def _on_context_changed(self, _context_id: object) -> None:
         self._apply_current_context()
 
@@ -1584,6 +1651,8 @@ class MainWindow(QMainWindow):
             self.term_explanation_label.clear()
             self.term_example_label.clear()
             self.term_count_label.setText("出现次数：-")
+            if hasattr(self, "term_sources_list"):
+                self.term_sources_list.clear()
             if hasattr(self, "favorite_button"):
                 self.favorite_button.setText("收藏")
             return
@@ -1596,6 +1665,45 @@ class MainWindow(QMainWindow):
         self.term_count_label.setText(str(term.review_count))
         if hasattr(self, "favorite_button"):
             self.favorite_button.setText("已收藏" if term.favorite else "收藏")
+        self._load_term_sources(term.id)
+
+    def _load_term_sources(self, term_id: int) -> None:
+        if not hasattr(self, "term_sources_list"):
+            return
+        sources = self.history_store.list_term_captures(term_id, limit=30)
+        self.term_sources_list.clear()
+        if not sources:
+            placeholder = QListWidgetItem("（暂无出处）")
+            placeholder.setData(Qt.ItemDataRole.UserRole, None)
+            placeholder.setFlags(placeholder.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.term_sources_list.addItem(placeholder)
+            return
+        for capture in sources:
+            title = (capture.source_text or capture.translation or "截图").strip().splitlines()
+            title = title[0] if title else "截图"
+            created = (capture.created_at or "").replace("T", " ")[:16]
+            item = QListWidgetItem(f"{_compact(title, 24)} · {created}")
+            item.setData(Qt.ItemDataRole.UserRole, capture.id)
+            self.term_sources_list.addItem(item)
+
+    def _on_term_row_selected(self) -> None:
+        self._show_selected_term()
+        row = self.terms_table.currentRow()
+        if 0 <= row < len(self._terms_records):
+            self.history_store.record_term_view(self._terms_records[row].id)
+
+    def _on_term_source_clicked(self, item: QListWidgetItem) -> None:
+        capture_id = item.data(Qt.ItemDataRole.UserRole)
+        if capture_id is None:
+            return
+        self._switch_page(0)
+        self.overview_page.select_capture(int(capture_id))
+
+    def _open_review(self) -> None:
+        dialog = ReviewDialog(self.history_store, self)
+        dialog.exec()
+        self.refresh_terms()
+        self._refresh_sidebar_stats()
 
     def _delete_selected_term(self) -> None:
         row = self.terms_table.currentRow()

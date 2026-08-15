@@ -4,12 +4,13 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
 
 from app.paths import DB_PATH, ensure_app_dirs
 from app.services.context_detector import detect_domain
+from app.services.term_quality import classify_difficulty, is_pure_stopword
 
 
 @dataclass(slots=True)
@@ -37,6 +38,30 @@ class TermRecord:
     review_count: int
     domain: str = "通用"
     favorite: bool = False
+    difficulty: str = ""
+    status: str = "new"
+    notes: str = ""
+    last_review_at: str = ""
+    due_at: str = ""
+    interval_days: int = 0
+    ease: float = 2.5
+    lapses: int = 0
+    views: int = 0
+    occurrences: int = 0
+    user_edited: bool = False
+
+
+@dataclass(slots=True)
+class LearningTip:
+    id: int
+    capture_id: int
+    content: str
+    tip_type: str = "followup"
+    status: str = "pending"
+    domain: str = ""
+    context_id: int | None = None
+    created_at: str = ""
+    done_at: str = ""
 
 
 @dataclass(slots=True)
@@ -147,6 +172,34 @@ class HistoryStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS term_captures (
+                    term_id INTEGER NOT NULL,
+                    capture_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (term_id, capture_id),
+                    FOREIGN KEY(term_id) REFERENCES terms(id) ON DELETE CASCADE,
+                    FOREIGN KEY(capture_id) REFERENCES captures(id) ON DELETE CASCADE
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learning_tips (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    capture_id INTEGER NOT NULL,
+                    context_id INTEGER,
+                    domain TEXT NOT NULL DEFAULT '',
+                    content TEXT NOT NULL,
+                    tip_type TEXT NOT NULL DEFAULT 'followup',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    done_at TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY(capture_id) REFERENCES captures(id) ON DELETE CASCADE
+                )
+                """
+            )
             self._initialize_contexts_table(conn)
             self._migrate_schema(conn)
             self._try_initialize_fts(conn)
@@ -242,6 +295,31 @@ class HistoryStore:
                     """
                 )
                 conn.execute("DROP TABLE terms_old")
+        except sqlite3.Error:
+            pass
+        # 个人知识库（0.7）：间隔重复 / 行为信号 / 治理字段，全部 ALTER TABLE 平滑升级
+        term_columns: dict[str, str] = {
+            "difficulty": "TEXT NOT NULL DEFAULT ''",
+            "status": "TEXT NOT NULL DEFAULT 'new'",
+            "notes": "TEXT NOT NULL DEFAULT ''",
+            "last_review_at": "TEXT NOT NULL DEFAULT ''",
+            "due_at": "TEXT NOT NULL DEFAULT ''",
+            "interval_days": "INTEGER NOT NULL DEFAULT 0",
+            "ease": "REAL NOT NULL DEFAULT 2.5",
+            "lapses": "INTEGER NOT NULL DEFAULT 0",
+            "views": "INTEGER NOT NULL DEFAULT 0",
+            "occurrences": "INTEGER NOT NULL DEFAULT 0",
+            "user_edited": "INTEGER NOT NULL DEFAULT 0",
+        }
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(terms)")}
+            for name, ddl in term_columns.items():
+                if name not in cols:
+                    conn.execute(f"ALTER TABLE terms ADD COLUMN {name} {ddl}")
+            conn.execute(
+                "UPDATE terms SET occurrences = review_count "
+                "WHERE occurrences = 0 AND review_count > 0"
+            )
         except sqlite3.Error:
             pass
 
@@ -422,35 +500,81 @@ class HistoryStore:
             row = conn.execute("SELECT * FROM captures WHERE id = ?", (capture_id,)).fetchone()
         return _capture_from_row(row) if row else None
 
-    def upsert_terms(self, terms: list[dict[str, Any]], domain: str = "通用") -> None:
+    def upsert_terms(
+        self,
+        terms: list[dict[str, Any]],
+        domain: str = "通用",
+        capture_id: int | None = None,
+    ) -> list[int]:
+        """Upsert AI-extracted terms with a quality-first merge strategy.
+
+        - Pure stopwords are skipped (never meaningful terms).
+        - Difficulty is classified locally (rule-based, zero API cost).
+        - Fill-blanks-first: a new explanation only fills empty fields of the
+          existing row; user-edited rows are never overwritten by AI output.
+        - ``occurrences`` counts every encounter (the legacy ``review_count``
+          column is kept in sync for readers that predate the rename).
+        - When ``capture_id`` is given, the term↔capture backlink is written
+          so each term keeps its origin context.
+        """
         if not terms:
-            return
+            return []
         now = datetime.now().isoformat(timespec="seconds")
+        ids: list[int] = []
         with self._connect() as conn:
             for term in terms:
                 name = str(term.get("term") or "").strip()
-                if not name:
+                if not name or is_pure_stopword(name):
                     continue
-                conn.execute(
+                term_domain = str(term.get("domain") or "").strip() or domain or "通用"
+                cursor = conn.execute(
                     """
                     INSERT INTO terms
-                        (term, domain, chinese_name, beginner_explanation, examples, first_seen_at, review_count)
-                    VALUES (?, ?, ?, ?, ?, ?, 1)
+                        (term, domain, chinese_name, beginner_explanation, examples,
+                         first_seen_at, review_count, occurrences, difficulty)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, 1, ?)
                     ON CONFLICT(term, domain) DO UPDATE SET
-                        chinese_name = excluded.chinese_name,
-                        beginner_explanation = excluded.beginner_explanation,
-                        examples = excluded.examples,
-                        review_count = terms.review_count + 1
+                        chinese_name = CASE
+                            WHEN terms.user_edited = 1 THEN terms.chinese_name
+                            WHEN terms.chinese_name != '' THEN terms.chinese_name
+                            ELSE excluded.chinese_name END,
+                        beginner_explanation = CASE
+                            WHEN terms.user_edited = 1 THEN terms.beginner_explanation
+                            WHEN terms.beginner_explanation != '' THEN terms.beginner_explanation
+                            ELSE excluded.beginner_explanation END,
+                        examples = CASE
+                            WHEN terms.user_edited = 1 THEN terms.examples
+                            WHEN terms.examples != '[]' THEN terms.examples
+                            ELSE excluded.examples END,
+                        review_count = terms.review_count + 1,
+                        occurrences = terms.occurrences + 1,
+                        difficulty = CASE
+                            WHEN terms.difficulty != '' THEN terms.difficulty
+                            ELSE excluded.difficulty END
                     """,
                     (
                         name,
-                        domain,
+                        term_domain,
                         str(term.get("chinese_name") or ""),
                         str(term.get("beginner_explanation") or ""),
                         json.dumps(term.get("examples") or [], ensure_ascii=False),
                         now,
+                        classify_difficulty(name),
                     ),
                 )
+                term_id = int(cursor.lastrowid or 0)
+                if not term_id:
+                    continue
+                if capture_id:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO term_captures(term_id, capture_id, created_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (term_id, capture_id, now),
+                    )
+                ids.append(term_id)
+        return ids
 
     def save_term(
         self,
@@ -470,7 +594,8 @@ class HistoryStore:
                 conn.execute(
                     """
                     UPDATE terms
-                    SET term = ?, domain = ?, chinese_name = ?, beginner_explanation = ?, examples = ?
+                    SET term = ?, domain = ?, chinese_name = ?, beginner_explanation = ?,
+                        examples = ?, user_edited = 1
                     WHERE id = ?
                     """,
                     (name, domain, chinese_name, beginner_explanation, payload, term_id),
@@ -479,12 +604,14 @@ class HistoryStore:
             cursor = conn.execute(
                 """
                 INSERT INTO terms
-                    (term, domain, chinese_name, beginner_explanation, examples, first_seen_at, review_count)
-                VALUES (?, ?, ?, ?, ?, ?, 1)
+                    (term, domain, chinese_name, beginner_explanation, examples,
+                     first_seen_at, review_count, occurrences, user_edited)
+                VALUES (?, ?, ?, ?, ?, ?, 1, 1, 1)
                 ON CONFLICT(term, domain) DO UPDATE SET
                     chinese_name = excluded.chinese_name,
                     beginner_explanation = excluded.beginner_explanation,
-                    examples = excluded.examples
+                    examples = excluded.examples,
+                    user_edited = 1
                 """,
                 (
                     name,
@@ -499,23 +626,204 @@ class HistoryStore:
 
     def delete_term(self, term_id: int) -> None:
         with self._connect() as conn:
+            conn.execute("DELETE FROM term_captures WHERE term_id = ?", (term_id,))
             conn.execute("DELETE FROM terms WHERE id = ?", (term_id,))
 
     def toggle_term_favorite(self, term_id: int) -> bool:
+        """Flip favorite; favoriting schedules the term into the review queue."""
+        now = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE terms SET favorite = 1 - favorite WHERE id = ?",
-                (term_id,),
-            )
             row = conn.execute("SELECT favorite FROM terms WHERE id = ?", (term_id,)).fetchone()
-        return bool(row["favorite"]) if row else False
+            if row is None:
+                return False
+            new_favorite = 0 if row["favorite"] else 1
+            if new_favorite:
+                conn.execute(
+                    "UPDATE terms SET favorite = 1, due_at = ?, status = 'review' WHERE id = ?",
+                    (now, term_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE terms SET favorite = 0, due_at = '', status = 'new' WHERE id = ?",
+                    (term_id,),
+                )
+        return bool(new_favorite)
+
+    def record_term_view(self, term_id: int) -> None:
+        """Bump the view counter — a behavior signal used to un-fold basic terms."""
+        with self._connect() as conn:
+            conn.execute("UPDATE terms SET views = views + 1 WHERE id = ?", (term_id,))
+
+    def review_term(self, term_id: int, grade: int) -> dict[str, object] | None:
+        """Apply a simplified SM-2 update (0 = forgot, 1 = fuzzy, 2 = remembered)."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM terms WHERE id = ?", (term_id,)).fetchone()
+            if row is None:
+                return None
+            ease = float(row["ease"] if row["ease"] else 2.5)
+            interval = int(row["interval_days"] or 0)
+            lapses = int(row["lapses"] or 0)
+            if grade <= 0:
+                interval = 1
+                lapses += 1
+                ease = max(1.3, ease - 0.2)
+            elif grade == 1:
+                interval = max(1, interval)
+                ease = max(1.3, ease - 0.1)
+            else:
+                if interval <= 0:
+                    interval = 1
+                elif interval == 1:
+                    interval = 6
+                else:
+                    interval = max(2, round(interval * ease))
+                ease = min(2.5, ease + 0.1)
+            now = datetime.now()
+            due_at = (now + timedelta(days=interval)).isoformat(timespec="seconds")
+            last_review_at = now.isoformat(timespec="seconds")
+            conn.execute(
+                """
+                UPDATE terms SET ease = ?, interval_days = ?, lapses = ?,
+                    due_at = ?, last_review_at = ?, status = 'review'
+                WHERE id = ?
+                """,
+                (ease, interval, lapses, due_at, last_review_at, term_id),
+            )
+        return {"interval_days": interval, "due_at": due_at, "ease": round(ease, 2)}
+
+    def list_due_terms(self, limit: int = 50) -> list[TermRecord]:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM terms
+                WHERE favorite = 1 AND due_at != '' AND due_at <= ?
+                ORDER BY due_at ASC, occurrences DESC, id ASC
+                LIMIT ?
+                """,
+                (now, limit),
+            ).fetchall()
+        return [_term_from_row(row) for row in rows]
+
+    def count_due_terms(self) -> int:
+        now = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM terms
+                WHERE favorite = 1 AND due_at != '' AND due_at <= ?
+                """,
+                (now,),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def list_term_captures(self, term_id: int, limit: int = 30) -> list[CaptureRecord]:
+        """Captures where this term appeared — the term's origin contexts."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.* FROM captures c
+                JOIN term_captures tc ON tc.capture_id = c.id
+                WHERE tc.term_id = ?
+                ORDER BY c.created_at DESC, c.id DESC
+                LIMIT ?
+                """,
+                (term_id, limit),
+            ).fetchall()
+        return [_capture_from_row(row) for row in rows]
+
+    def save_learning_tip(
+        self,
+        capture_id: int,
+        content: str,
+        tip_type: str = "followup",
+        domain: str = "",
+        context_id: int | None = None,
+    ) -> int:
+        content = (content or "").strip()
+        if not content:
+            return 0
+        created_at = datetime.now().isoformat(timespec="seconds")
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO learning_tips(capture_id, context_id, domain, content, tip_type, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (capture_id, context_id, domain or "", content, tip_type or "followup", created_at),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def list_learning_tips(
+        self,
+        status: str = "pending",
+        domain: str = "",
+        limit: int = 100,
+    ) -> list[LearningTip]:
+        where: list[str] = []
+        params: list = []
+        if status:
+            where.append("status = ?")
+            params.append(status)
+        if domain:
+            where.append("domain = ?")
+            params.append(domain)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM learning_tips
+                {where_sql}
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            ).fetchall()
+        return [_tip_from_row(row) for row in rows]
+
+    def set_learning_tip_status(self, tip_id: int, status: str) -> bool:
+        done_at = (
+            datetime.now().isoformat(timespec="seconds")
+            if status in ("done", "ignored")
+            else ""
+        )
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE learning_tips SET status = ?, done_at = ? WHERE id = ?",
+                (status, done_at, tip_id),
+            )
+            return cursor.rowcount > 0
+
+    def count_learning_tips(self, status: str = "pending") -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM learning_tips WHERE status = ?",
+                (status,),
+            ).fetchone()
+        return int(row[0]) if row else 0
 
     def delete_capture(self, capture_id: int) -> None:
         with self._connect() as conn:
+            conn.execute("DELETE FROM term_captures WHERE capture_id = ?", (capture_id,))
+            conn.execute("DELETE FROM learning_tips WHERE capture_id = ?", (capture_id,))
             conn.execute("DELETE FROM captures WHERE id = ?", (capture_id,))
 
     def delete_captures_before(self, before_date: str) -> int:
         with self._connect() as conn:
+            conn.execute(
+                """
+                DELETE FROM term_captures
+                WHERE capture_id IN (SELECT id FROM captures WHERE created_at < ?)
+                """,
+                (before_date,),
+            )
+            conn.execute(
+                """
+                DELETE FROM learning_tips
+                WHERE capture_id IN (SELECT id FROM captures WHERE created_at < ?)
+                """,
+                (before_date,),
+            )
             cursor = conn.execute(
                 "DELETE FROM captures WHERE created_at < ?",
                 (before_date,),
@@ -583,6 +891,7 @@ class HistoryStore:
         domain: str = "",
         limit: int = 200,
         offset: int = 0,
+        exclude_basic: bool = False,
     ) -> list[TermRecord]:
         query = query.strip()
         where: list[str] = []
@@ -594,6 +903,9 @@ class HistoryStore:
         if domain:
             where.append("domain = ?")
             params.append(domain)
+        if exclude_basic and not query:
+            # 折叠低价值词，但保留有任何行为信号（收藏/查看）的词
+            where.append("NOT (difficulty = 'basic' AND favorite = 0 AND views = 0)")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as conn:
             rows = conn.execute(
@@ -614,7 +926,7 @@ class HistoryStore:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def count_terms(self, query: str = "", domain: str = "") -> int:
+    def count_terms(self, query: str = "", domain: str = "", exclude_basic: bool = False) -> int:
         query = query.strip()
         where: list[str] = []
         params: list = []
@@ -625,6 +937,8 @@ class HistoryStore:
         if domain:
             where.append("domain = ?")
             params.append(domain)
+        if exclude_basic and not query:
+            where.append("NOT (difficulty = 'basic' AND favorite = 0 AND views = 0)")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as conn:
             row = conn.execute(
@@ -632,7 +946,7 @@ class HistoryStore:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    def term_domain_counts(self, query: str = "") -> list[tuple[str, int]]:
+    def term_domain_counts(self, query: str = "", exclude_basic: bool = False) -> list[tuple[str, int]]:
         """Count terms per domain (optional search query scoping)."""
         query = query.strip()
         where: list[str] = []
@@ -641,6 +955,8 @@ class HistoryStore:
             like = f"%{query}%"
             where.append("(term LIKE ? OR chinese_name LIKE ? OR beginner_explanation LIKE ?)")
             params.extend([like, like, like])
+        if exclude_basic and not query:
+            where.append("NOT (difficulty = 'basic' AND favorite = 0 AND views = 0)")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         with self._connect() as conn:
             rows = conn.execute(
@@ -895,6 +1211,12 @@ def _capture_from_row(row: sqlite3.Row) -> CaptureRecord:
 
 
 def _term_from_row(row: sqlite3.Row) -> TermRecord:
+    keys = row.keys()
+    occurrences = (
+        int(row["occurrences"])
+        if "occurrences" in keys and row["occurrences"]
+        else int(row["review_count"])
+    )
     return TermRecord(
         id=int(row["id"]),
         term=str(row["term"]),
@@ -902,9 +1224,34 @@ def _term_from_row(row: sqlite3.Row) -> TermRecord:
         beginner_explanation=str(row["beginner_explanation"]),
         examples=_loads_list(row["examples"]),
         first_seen_at=str(row["first_seen_at"]),
-        review_count=int(row["review_count"]),
+        review_count=occurrences,
         domain=str(row["domain"]) if "domain" in row.keys() else "通用",
         favorite=bool(row["favorite"]) if "favorite" in row.keys() else False,
+        difficulty=str(row["difficulty"]) if "difficulty" in keys else "",
+        status=str(row["status"]) if "status" in keys else "new",
+        notes=str(row["notes"]) if "notes" in keys else "",
+        last_review_at=str(row["last_review_at"]) if "last_review_at" in keys else "",
+        due_at=str(row["due_at"]) if "due_at" in keys else "",
+        interval_days=int(row["interval_days"] or 0) if "interval_days" in keys else 0,
+        ease=float(row["ease"] if row["ease"] else 2.5) if "ease" in keys else 2.5,
+        lapses=int(row["lapses"] or 0) if "lapses" in keys else 0,
+        views=int(row["views"] or 0) if "views" in keys else 0,
+        occurrences=occurrences,
+        user_edited=bool(row["user_edited"]) if "user_edited" in keys else False,
+    )
+
+
+def _tip_from_row(row: sqlite3.Row) -> LearningTip:
+    return LearningTip(
+        id=int(row["id"]),
+        capture_id=int(row["capture_id"]),
+        content=str(row["content"]),
+        tip_type=str(row["tip_type"] or "followup"),
+        status=str(row["status"] or "pending"),
+        domain=str(row["domain"] or ""),
+        context_id=int(row["context_id"]) if row["context_id"] else None,
+        created_at=str(row["created_at"] or ""),
+        done_at=str(row["done_at"] or ""),
     )
 
 
