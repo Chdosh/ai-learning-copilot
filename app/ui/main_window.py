@@ -42,7 +42,12 @@ from app.paths import DATA_DIR, DB_PATH, PROJECT_DIR, SCREENSHOTS_DIR, ensure_ap
 from app.services.categorizer import get_all_categories
 from app.services.context_detector import DOMAIN_KEYWORDS
 from app.services.history_store import CaptureRecord, HistoryStore, TermRecord
-from app.services.knowledge_base import KnowledgeBase, SaveTermCommand
+from app.services.knowledge_base import (
+    KnowledgeBase,
+    SaveTermCommand,
+    TermQuery,
+    TermViewItem,
+)
 from app.services.ocr import OCRService
 from app.services.screenshot import ScreenshotError, take_screenshots
 from app.services.hotkey import HotkeyManager
@@ -69,12 +74,14 @@ from app.ui.theme import (
     RADIUS_LG,
     RADIUS_MD,
     RADIUS_PILL,
+    RADIUS_SM,
     SUCCESS,
     TEXT,
     TEXT_SECONDARY,
     apply_primary_button_style,
     button_qss,
     card_qss,
+    chip_qss,
     ensure_label_backgrounds_transparent,
     nav_qss,
 )
@@ -144,7 +151,10 @@ class MainWindow(QMainWindow):
         self.capture_worker: CaptureStreamWorker | None = None
         self.followup_worker: FollowupWorker | None = None
         self._history_records: list[CaptureRecord] = []
-        self._terms_records: list[TermRecord] = []
+        self._terms_records: list[TermViewItem] = []
+        self._terms_view = "focus"  # focus | current_direction | all
+        self._terms_domain_counts: list[tuple[str, int]] = []
+        self._terms_direction_label = "通用"
         self._terms_page = 0
         self._terms_domain = ""
         self._terms_query = ""
@@ -344,24 +354,20 @@ class MainWindow(QMainWindow):
             self._terms_page = 0
         self._terms_query = query
 
-        counts = self.history_store.term_domain_counts(query=query, exclude_basic=True)
-        if self._terms_domain not in {d for d, _ in counts}:
-            self._terms_domain = ""
-        domain = self._terms_domain
+        current_context_id, effective_domain, direction_label = self._current_terms_direction()
+        self._terms_direction_label = direction_label
+        # current_direction 视图由方向范围接管，手动领域筛选失效（方案 §6.5）
+        domain = "" if self._terms_view == "current_direction" else self._terms_domain
 
-        self._terms_total = self.history_store.count_terms(
-            query=query, domain=domain, exclude_basic=True
-        )
-        self._terms_pages = max(1, (self._terms_total + TERMS_PAGE_SIZE - 1) // TERMS_PAGE_SIZE)
-        self._terms_page = max(0, min(self._terms_page, self._terms_pages - 1))
-        terms = self.history_store.list_terms(
-            query=query,
-            domain=domain,
-            limit=TERMS_PAGE_SIZE,
-            offset=self._terms_page * TERMS_PAGE_SIZE,
-            exclude_basic=True,
-        )
-        self._terms_records = terms
+        page = self._query_term_page(query, domain, current_context_id, effective_domain)
+        self._terms_total = page.total
+        self._terms_pages = max(1, (page.total + TERMS_PAGE_SIZE - 1) // TERMS_PAGE_SIZE)
+        # 过滤结果变少导致当前页越界时，回退到最后一页（只多一次查询）
+        if page.total and not page.items and self._terms_page >= self._terms_pages:
+            self._terms_page = self._terms_pages - 1
+            page = self._query_term_page(query, domain, current_context_id, effective_domain)
+        self._terms_records = page.items
+        self._terms_domain_counts = page.domain_counts
 
         table = self.terms_table
         selected_id = None
@@ -373,8 +379,9 @@ class MainWindow(QMainWindow):
         table.setUpdatesEnabled(False)
         try:
             table.verticalHeader().setDefaultSectionSize(max(26, self.ui_font_size + 15))
-            table.setRowCount(len(terms))
-            for row, term in enumerate(terms):
+            table.setRowCount(len(page.items))
+            for row, view_item in enumerate(page.items):
+                term = view_item.term
                 values = [
                     term.term,
                     term.domain,
@@ -390,8 +397,12 @@ class MainWindow(QMainWindow):
                     table.setItem(row, column, item)
 
             target_row = next(
-                (row for row, term in enumerate(terms) if term.id == selected_id),
-                0 if terms else -1,
+                (
+                    row
+                    for row, view_item in enumerate(page.items)
+                    if view_item.term.id == selected_id
+                ),
+                0 if page.items else -1,
             )
             if target_row >= 0:
                 table.selectRow(target_row)
@@ -404,11 +415,15 @@ class MainWindow(QMainWindow):
         self._show_selected_term()
         header_item = self.terms_table.horizontalHeaderItem(1)
         if header_item is not None:
-            header_item.setText(f"{self._terms_domain or '领域'} ▾")
+            if self._terms_view == "current_direction":
+                header_item.setText(f"{direction_label} ▾")
+            else:
+                header_item.setText(f"{self._terms_domain or '领域'} ▾")
         self.terms_page_label.setText(f"第 {self._terms_page + 1}/{self._terms_pages} 页")
         self.terms_prev_button.setEnabled(self._terms_page > 0)
         self.terms_next_button.setEnabled(self._terms_page < self._terms_pages - 1)
         self._update_terms_hscroll_buttons()
+        self._sync_terms_view_controls()
         if hasattr(self, "terms_review_button"):
             due = self.knowledge_base.count_due_terms()
             self.terms_review_button.setText(f"今日复习 ({due})" if due else "今日复习")
@@ -418,6 +433,58 @@ class MainWindow(QMainWindow):
                 f"截图 {len(self._history_records)} · 术语 {self._terms_total} · 收藏 {fav_count}"
             )
 
+    def _query_term_page(
+        self,
+        query: str,
+        domain: str,
+        current_context_id: int | None,
+        effective_domain: str,
+    ):
+        return self.knowledge_base.query_terms(
+            TermQuery(
+                view=self._terms_view,
+                query=query,
+                domain=domain,
+                current_context_id=current_context_id,
+                effective_domain=effective_domain,
+                limit=TERMS_PAGE_SIZE,
+                offset=self._terms_page * TERMS_PAGE_SIZE,
+            )
+        )
+
+    def _current_terms_direction(self) -> tuple[int | None, str, str]:
+        """(current_context_id, effective_domain, display_name)：当前学习方向事实。"""
+        settings = self.settings_service.load()
+        context_id = settings.current_context_id
+        if context_id is not None:
+            context = self.history_store.get_context(context_id)
+            if context is not None and not context.builtin:
+                domain = context.domain or "通用"
+                scene = context.scene or "通用"
+                display = (context.name or "").strip() or (
+                    f"{domain} · {scene}" if scene != "通用" else domain
+                )
+                return context.id, domain, display
+        domain, scene = self.settings_service.get_quick_context()
+        display = f"{domain} · {scene}" if scene != "通用" else domain
+        return None, domain or "通用", display
+
+    def _set_terms_view(self, view: str) -> None:
+        if view == self._terms_view:
+            return
+        self._terms_view = view
+        self._terms_page = 0
+        self.refresh_terms()
+
+    def _sync_terms_view_controls(self) -> None:
+        for key, button in getattr(self, "_terms_view_buttons", {}).items():
+            button.setChecked(key == self._terms_view)
+        if hasattr(self, "terms_view_label"):
+            if self._terms_view == "current_direction":
+                self.terms_view_label.setText(f"当前方向：{self._terms_direction_label}")
+            else:
+                self.terms_view_label.setText("")
+
     def _terms_goto_page(self, page: int) -> None:
         self._terms_page = max(0, min(page, self._terms_pages - 1))
         self.refresh_terms()
@@ -425,7 +492,10 @@ class MainWindow(QMainWindow):
     def _on_terms_header_clicked(self, section: int) -> None:
         if section != 1:
             return
-        counts = dict(self.history_store.term_domain_counts(query=self._terms_query))
+        # 当前方向视图由方向范围接管，手动领域筛选失效（方案 §6.5）
+        if self._terms_view == "current_direction":
+            return
+        counts = dict(self._terms_domain_counts)
         ordered: list[str] = []
         for direction in ["通用"] + list(DOMAIN_KEYWORDS.keys()):
             if direction in counts:
@@ -766,6 +836,28 @@ class MainWindow(QMainWindow):
         table_header_row.addWidget(self.terms_review_button)
         self._sync_terms_search_height()
         table_layout.addLayout(table_header_row)
+
+        # P1-C：视图切换（设计系统：胶囊 = 可切换），不改变表格视觉结构
+        view_row = QHBoxLayout()
+        view_row.setSpacing(6)
+        self._terms_view_buttons: dict[str, QPushButton] = {}
+        for key, label in (
+            ("focus", "重点"),
+            ("current_direction", "当前方向"),
+            ("all", "全部"),
+        ):
+            button = QPushButton(label)
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setStyleSheet(chip_qss())
+            button.clicked.connect(lambda checked=False, v=key: self._set_terms_view(v))
+            view_row.addWidget(button)
+            self._terms_view_buttons[key] = button
+        view_row.addStretch(1)
+        self.terms_view_label = QLabel("")
+        self.terms_view_label.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
+        view_row.addWidget(self.terms_view_label)
+        table_layout.addLayout(view_row)
         self.terms_table = QTableWidget(0, 6)
         self.terms_table.setObjectName("termsTable")
         self.terms_table.setFrameShape(QFrame.Shape.NoFrame)
@@ -925,6 +1017,16 @@ class MainWindow(QMainWindow):
         term_header.addWidget(self.term_name_label, 1, Qt.AlignmentFlag.AlignBottom)
         term_header.addWidget(self.term_domain_label, 0, Qt.AlignmentFlag.AlignBottom)
         detail_layout.addLayout(term_header)
+
+        # P1-C：排序理由（由 KnowledgeBase 生成，UI 只展示，不重算）
+        self.term_reasons_label = QLabel("")
+        self.term_reasons_label.setWordWrap(True)
+        self.term_reasons_label.setStyleSheet(
+            f"color:{PRIMARY_DARK}; background:{PRIMARY_SOFT}; border-radius:{RADIUS_SM}; "
+            "padding:4px 8px;"
+        )
+        self.term_reasons_label.setVisible(False)
+        detail_layout.addWidget(self.term_reasons_label)
         self.term_chinese_label = QLabel("中文名：-")
         self.term_count_label = QLabel("出现次数：-")
         for label in (
@@ -1077,7 +1179,7 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        terms = self.history_store.list_terms(limit=1000)
+        terms = self.knowledge_base.list_terms(TermQuery(view="all", limit=1000))
         import csv
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -1395,6 +1497,7 @@ class MainWindow(QMainWindow):
         self.settings = self.settings_service.load()
         self.workbench_page.refresh_directions()
         self.overview_page.refresh_direction_label()
+        self.refresh_terms()
         self.status_label.setText(f"当前学习方向：{self._current_context_name()}")
 
     def _current_context_name(self) -> str:
@@ -1653,18 +1756,28 @@ class MainWindow(QMainWindow):
             self.term_explanation_label.clear()
             self.term_example_label.clear()
             self.term_count_label.setText("出现次数：-")
+            if hasattr(self, "term_reasons_label"):
+                self.term_reasons_label.setText("")
+                self.term_reasons_label.setVisible(False)
             if hasattr(self, "term_sources_list"):
                 self.term_sources_list.clear()
             if hasattr(self, "favorite_button"):
                 self.favorite_button.setText("收藏")
             return
-        term = self._terms_records[row]
+        view_item = self._terms_records[row]
+        term = view_item.term
         self.term_name_label.setText(term.term)
         self.term_domain_label.setText(term.domain or "通用")
         self.term_chinese_label.setText(term.chinese_name or "无")
         self.term_explanation_label.setPlainText(term.beginner_explanation or "无")
         self.term_example_label.setPlainText("；".join(term.examples) if term.examples else "无")
-        self.term_count_label.setText(str(term.review_count))
+        self.term_count_label.setText(
+            f"出现 {term.review_count} 次 · 来自 {view_item.source_count} 条记录"
+        )
+        if hasattr(self, "term_reasons_label"):
+            reasons = view_item.reasons
+            self.term_reasons_label.setText("　·　".join(reasons))
+            self.term_reasons_label.setVisible(bool(reasons))
         if hasattr(self, "favorite_button"):
             self.favorite_button.setText("已收藏" if term.favorite else "收藏")
         self._load_term_sources(term.id)
@@ -1692,8 +1805,13 @@ class MainWindow(QMainWindow):
         self._show_selected_term()
         row = self.terms_table.currentRow()
         if 0 <= row < len(self._terms_records):
-            updated = self.knowledge_base.record_view(self._terms_records[row].id)
-            self._terms_records[row] = updated
+            view_item = self._terms_records[row]
+            updated = self.knowledge_base.record_view(view_item.term.id)
+            self._terms_records[row] = TermViewItem(
+                term=updated,
+                source_count=view_item.source_count,
+                reasons=view_item.reasons,
+            )
 
     def _on_term_source_clicked(self, item: QListWidgetItem) -> None:
         capture_id = item.data(Qt.ItemDataRole.UserRole)
@@ -1712,7 +1830,7 @@ class MainWindow(QMainWindow):
         row = self.terms_table.currentRow()
         if row < 0 or row >= len(self._terms_records):
             return
-        term = self._terms_records[row]
+        term = self._terms_records[row].term
         reply = QMessageBox.question(
             self,
             "删除术语",
@@ -1721,7 +1839,7 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self.history_store.delete_term(term.id)
+        self.knowledge_base.delete_term(term.id)
         self.refresh_terms()
         self.status_label.setText("术语已删除。")
 
@@ -1755,7 +1873,7 @@ class MainWindow(QMainWindow):
         row = self.terms_table.currentRow()
         if row < 0 or row >= len(self._terms_records):
             return
-        current = self._terms_records[row]
+        current = self._terms_records[row].term
         term, ok = QInputDialog.getText(self, "编辑术语", "术语", text=current.term)
         if not ok or not term.strip():
             return
@@ -1800,9 +1918,14 @@ class MainWindow(QMainWindow):
         row = self.terms_table.currentRow()
         if row < 0 or row >= len(self._terms_records):
             return
-        term = self._terms_records[row]
+        view_item = self._terms_records[row]
+        term = view_item.term
         updated = self.knowledge_base.set_favorite(term.id, favorite=not term.favorite)
-        self._terms_records[row] = updated
+        self._terms_records[row] = TermViewItem(
+            term=updated,
+            source_count=view_item.source_count,
+            reasons=view_item.reasons,
+        )
         self._show_selected_term()
         self._refresh_sidebar_stats()
         self.status_label.setText(
