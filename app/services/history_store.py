@@ -101,6 +101,15 @@ class AccumulationAggregate:
 
 
 @dataclass(slots=True)
+class RelatedAggregate:
+    """相关知识（同 capture 共现）的原始来源事实；理由由 KnowledgeBase 生成。"""
+
+    term: TermRecord
+    shared_source_count: int
+    shared_domains: tuple[str, ...]
+
+
+@dataclass(slots=True)
 class ContextRecord:
     id: int
     name: str
@@ -1393,6 +1402,64 @@ class HistoryStore:
                 exact_count=int(row["exact_count"]),
                 other_count=int(row["other_count"]),
                 null_count=int(row["null_count"]),
+            )
+            for row in rows
+        ]
+
+    def _fetch_related_term_facts(
+        self,
+        *,
+        term_id: int,
+        limit: int,
+    ) -> list[RelatedAggregate]:
+        """动态计算同 capture 共现（P1.5-C），不物化 term_pairs。
+
+        证据 = 与目标术语出现在同一 capture 的其它术语；共同 capture
+        删除后共享计数自动下降，归零即消失。
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                WITH my_captures AS (
+                    SELECT capture_id FROM term_captures WHERE term_id = ?
+                ),
+                shared AS (
+                    SELECT tc.term_id AS related_id,
+                           COUNT(DISTINCT tc.capture_id) AS shared_source_count
+                    FROM term_captures tc
+                    WHERE tc.capture_id IN (SELECT capture_id FROM my_captures)
+                      AND tc.term_id != ?
+                    GROUP BY tc.term_id
+                ),
+                shared_domains AS (
+                    SELECT tc.term_id AS related_id,
+                           GROUP_CONCAT(DISTINCT c.domain) AS domains
+                    FROM term_captures tc
+                    JOIN captures c ON c.id = tc.capture_id
+                    WHERE tc.capture_id IN (SELECT capture_id FROM my_captures)
+                      AND tc.term_id != ?
+                    GROUP BY tc.term_id
+                )
+                SELECT t.*,
+                       s.shared_source_count,
+                       sd.domains AS shared_domains
+                FROM shared s
+                JOIN shared_domains sd ON sd.related_id = s.related_id
+                JOIN terms t ON t.id = s.related_id
+                ORDER BY s.shared_source_count DESC, t.id ASC
+                LIMIT ?
+                """,
+                (term_id, term_id, term_id, limit),
+            ).fetchall()
+        return [
+            RelatedAggregate(
+                term=_term_from_row(row),
+                shared_source_count=int(row["shared_source_count"]),
+                shared_domains=tuple(
+                    domain.strip()
+                    for domain in str(row["shared_domains"] or "").split(",")
+                    if domain.strip()
+                ),
             )
             for row in rows
         ]

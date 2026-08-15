@@ -106,6 +106,59 @@ def test_learning_page_renders_recent_accumulation_and_emits_source(tmp_path) ->
     app.processEvents()
 
 
+def test_learning_page_related_terms_expand_and_collapse(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store, service, kb, page = _page(tmp_path)
+    capture_id = store.save_capture(
+        image_path="",
+        source_text="overfitting and regularization",
+        translation="过拟合与正则化",
+        explanation="",
+        domain="AI概念",
+    )
+    kb.ingest(
+        KnowledgeIngest(
+            capture_id=capture_id,
+            terms=[
+                {"term": "overfitting", "chinese_name": "过拟合", "domain": "AI概念"},
+                {"term": "regularization", "chinese_name": "正则化", "domain": "AI概念"},
+            ],
+            domain="AI概念",
+        )
+    )
+
+    page.show()
+    page.refresh()
+    app.processEvents()
+
+    related_buttons = [
+        button
+        for button in page.accumulation_list.findChildren(QPushButton)
+        if button.property("related") is True
+    ]
+    assert len(related_buttons) == 2  # 两条积累各有一个"相关知识"
+
+    related_buttons[0].click()
+    app.processEvents()
+    # 展开的积累行内出现相关术语与理由
+    visible_labels = [
+        label.text()
+        for label in page.accumulation_list.findChildren(QLabel)
+        if label.isVisible()
+    ]
+    assert any(
+        "regularization" in text and "共同出现在 1 条学习记录" in text
+        for text in visible_labels
+    )
+    assert related_buttons[0].text() == "收起相关知识"
+
+    related_buttons[0].click()
+    app.processEvents()
+    assert related_buttons[0].text() == "相关知识"
+    page.deleteLater()
+    app.processEvents()
+
+
 def test_learning_page_shows_due_review_count(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
     store, service, kb, page = _page(tmp_path)

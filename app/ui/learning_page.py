@@ -27,6 +27,7 @@ from app.services.knowledge_base import (
     AccumulationItem,
     AccumulationQuery,
     KnowledgeBase,
+    RelatedTermQuery,
     TipQuery,
 )
 from app.services.settings import SettingsService
@@ -232,7 +233,71 @@ class LearningPage(QWidget):
             )
         )
         box.addWidget(source_button)
+
+        # P1.5-C：相关知识（同来源共现），点击惰性加载，无 N+1
+        related_button = QPushButton("相关知识")
+        related_button.setProperty("related", True)
+        related_button.setStyleSheet(button_qss())
+        related_panel = QWidget()
+        related_panel.setStyleSheet("background: transparent;")
+        related_panel_layout = QVBoxLayout(related_panel)
+        related_panel_layout.setContentsMargins(8, 2, 0, 2)
+        related_panel_layout.setSpacing(3)
+        related_panel.setVisible(False)
+        related_button.clicked.connect(
+            lambda checked=False, b=related_button, p=related_panel, i=item: (
+                self._toggle_related(i, b, p)
+            )
+        )
+        box.addWidget(related_button)
+        box.addWidget(related_panel)
         return row
+
+    def _toggle_related(
+        self,
+        item: AccumulationItem,
+        button: QPushButton,
+        panel: QWidget,
+    ) -> None:
+        if not panel.property("loaded"):
+            current_context_id, effective_domain = self._current_direction_facts()
+            page = self.knowledge_base.query_related_terms(
+                RelatedTermQuery(
+                    term_id=item.term.id,
+                    limit=5,
+                    current_context_id=current_context_id,
+                    effective_domain=effective_domain,
+                )
+            )
+            layout = panel.layout()
+            if page.items:
+                for related in page.items:
+                    names = [
+                        related.term.term.strip(),
+                        related.term.chinese_name.strip(),
+                    ]
+                    label = QLabel(
+                        " · ".join(name for name in names if name)
+                        + "　—　"
+                        + " · ".join(related.reasons)
+                    )
+                    label.setStyleSheet(
+                        f"color: {TEXT_SECONDARY}; font-size: 12px; "
+                        "background: transparent;"
+                    )
+                    label.setWordWrap(True)
+                    layout.addWidget(label)
+            else:
+                empty = QLabel("暂无相关知识（还没有和它出现在同一来源的知识）")
+                empty.setStyleSheet(
+                    f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;"
+                )
+                empty.setWordWrap(True)
+                layout.addWidget(empty)
+            panel.setProperty("loaded", True)
+        visible = not panel.isVisible()
+        panel.setVisible(visible)
+        button.setText("收起相关知识" if visible else "相关知识")
 
     # ---- 今日复习 ----
 

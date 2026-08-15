@@ -15,6 +15,7 @@ from app.services.history_store import (
     CaptureRecord,
     HistoryStore,
     LearningTip,
+    RelatedAggregate,
     TermAggregate,
     TermRecord,
 )
@@ -106,6 +107,42 @@ class AccumulationItem:
 @dataclass(slots=True)
 class AccumulationPage:
     items: list[AccumulationItem]
+
+
+@dataclass(slots=True)
+class RelatedTermQuery:
+    """一次"查看某条积累的相关知识"的查询请求（方案 §7.3 P1.5-C）。
+
+    关联证据只来自真实来源事实（同 capture 共现），禁止文本相似或
+    embedding 冒充关联；不新增 term_pairs 物化表。
+    """
+
+    term_id: int
+    limit: int = 5
+    current_context_id: int | None = None
+    effective_domain: str = "通用"
+
+
+@dataclass(slots=True)
+class RelatedTermItem:
+    """一条相关知识：术语 + 共同来源证据 + 展示理由。
+
+    不变量（测试已锁定）：
+    - ``shared_source_count`` 按不同共同 capture 计数，同 capture 重试不虚增；
+    - 结果不包含查询术语自身；
+    - 共同 capture 被删除后，共享计数随之减少，归零即消失；
+    - 理由必须可理解：共同来源证据 + 方向事实。
+    """
+
+    term: TermRecord
+    shared_source_count: int
+    shared_domains: tuple[str, ...]
+    reasons: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class RelatedTermPage:
+    items: list[RelatedTermItem]
 
 
 # 排序封顶常量：高频只证明“多次出现”，不能无限放大价值（方案 §6.6）。
@@ -262,6 +299,49 @@ class KnowledgeBase:
             and (current_context_id is None or aggregate.other_count == 0)
         ):
             reasons.append("与当前方向同领域")
+        return tuple(reasons)
+
+    def query_related_terms(self, query: RelatedTermQuery) -> RelatedTermPage:
+        """返回某条积累的"相关知识"（方案 §7.3 P1.5-C）。
+
+        契约要点：
+        - 关联证据 = 与目标术语出现在同一 capture 的其它术语（动态共现，
+          不物化 term_pairs）；
+        - 排序：共同来源数降序，term.id 升序稳定键；
+        - 结果排除目标术语自身；共同 capture 删除后共享计数同步下降；
+        - 理由格式由 P1.5-C 测试冻结：共同来源证据 + 方向事实。
+        """
+        if query.term_id <= 0:
+            raise ValueError("term_id 必须大于 0")
+        if query.limit <= 0:
+            raise ValueError("limit 必须大于 0")
+        aggregates = self.store._fetch_related_term_facts(
+            term_id=query.term_id,
+            limit=query.limit,
+        )
+        return RelatedTermPage(
+            items=[
+                RelatedTermItem(
+                    term=aggregate.term,
+                    shared_source_count=aggregate.shared_source_count,
+                    shared_domains=aggregate.shared_domains,
+                    reasons=self._build_related_reasons(
+                        aggregate, effective_domain=query.effective_domain
+                    ),
+                )
+                for aggregate in aggregates
+            ]
+        )
+
+    @staticmethod
+    def _build_related_reasons(
+        aggregate: RelatedAggregate,
+        *,
+        effective_domain: str,
+    ) -> tuple[str, ...]:
+        reasons = [f"共同出现在 {aggregate.shared_source_count} 条学习记录"]
+        if aggregate.term.domain == effective_domain and effective_domain != "通用":
+            reasons.append(f"同属 {effective_domain} 领域")
         return tuple(reasons)
 
     @staticmethod
