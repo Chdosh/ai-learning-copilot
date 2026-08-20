@@ -38,7 +38,7 @@ Windows 桌面截图翻译 / 学习助手：框选屏幕任意区域，本地 OC
 
 ## 支持平台
 
-Windows 10 / 11 x64。目前未签名、无自动更新；macOS / Linux 暂不支持。后续计划见 [路线图](docs/ROADMAP.md)。
+Windows 10 / 11 x64。Portable 版本已支持内置自动更新；当前仍未签名。macOS / Linux 暂不支持。后续计划见 [路线图](docs/ROADMAP.md)。
 
 ## 从源码运行
 

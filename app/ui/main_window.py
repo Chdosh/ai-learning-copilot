@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -37,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app import VERSION_LABEL
+from app import VERSION_LABEL, __version__
 from app.paths import DATA_DIR, DB_PATH, PROJECT_DIR, SCREENSHOTS_DIR, ensure_app_dirs
 from app.services.categorizer import get_all_categories
 from app.services.history_store import CaptureRecord, HistoryStore, TermRecord
@@ -51,6 +52,7 @@ from app.services.ocr import OCRService
 from app.services.screenshot import ScreenshotError, take_screenshots
 from app.services.hotkey import HotkeyManager
 from app.services.settings import AppSettings, SettingsService
+from app.services.update import DownloadedUpdate, UpdateError, UpdateInfo, launch_update
 from app.ui.learning_page import LearningPage
 from app.ui.overview import OverviewPage
 from app.ui.result_window import ResultWindow
@@ -86,7 +88,7 @@ from app.ui.theme import (
     nav_qss,
 )
 from app.ui.workbench import WorkbenchPage
-from app.ui.workers import CaptureStreamWorker, FollowupWorker
+from app.ui.workers import CaptureStreamWorker, FollowupWorker, UpdateCheckWorker, UpdateDownloadWorker
 
 TERMS_PAGE_SIZE = 20
 
@@ -155,6 +157,10 @@ class MainWindow(QMainWindow):
         self._result_visible_before_capture: bool = False
         self.capture_worker: CaptureStreamWorker | None = None
         self.followup_worker: FollowupWorker | None = None
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_download_worker: UpdateDownloadWorker | None = None
+        self._update_info: UpdateInfo | None = None
+        self._update_check_manual = False
         self._history_records: list[CaptureRecord] = []
         self._terms_records: list[TermViewItem] = []
         self._terms_time_range = ""
@@ -195,6 +201,8 @@ class MainWindow(QMainWindow):
         self._refresh_sidebar_stats()
         self.refresh_ocr_status()
         self._show_float_bar()
+        if getattr(sys, "frozen", False):
+            QTimer.singleShot(1800, lambda: self.check_for_updates(False))
 
     def start_capture(self) -> None:
         if self._capturing:
@@ -1222,6 +1230,123 @@ class MainWindow(QMainWindow):
         )
         QMessageBox.information(self, "数据库信息", info)
 
+    def check_for_updates(self, manual: bool = True) -> None:
+        worker = self.update_check_worker
+        if worker is not None and worker.isRunning():
+            return
+
+        self._update_check_manual = manual
+        self.update_status_label.setText("正在检查最新稳定版...")
+        self.update_check_button.setEnabled(False)
+        worker = UpdateCheckWorker(__version__)
+        self.update_check_worker = worker
+        worker.completed.connect(self._on_update_check_completed)
+        worker.failed.connect(self._on_update_check_failed)
+        worker.finished.connect(lambda: self.update_check_button.setEnabled(True))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_update_check_completed(self, info: UpdateInfo | None) -> None:
+        self.update_check_worker = None
+        if info is None:
+            self.update_status_label.setText(f"当前已是最新版本 {VERSION_LABEL}")
+            if self._update_check_manual:
+                QMessageBox.information(
+                    self,
+                    "检查更新",
+                    f"当前已是最新版本 {VERSION_LABEL}。",
+                )
+            return
+
+        self._update_info = info
+        self.update_status_label.setText(f"发现新版本 {info.version}")
+        box = QMessageBox(self)
+        box.setWindowTitle("发现新版本")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"发现 AI Learning Copilot {info.version}")
+        box.setInformativeText(
+            f"当前版本：{VERSION_LABEL}\n下载后程序会退出，更新器会保留 data 数据。"
+        )
+        box.setDetailedText(info.release_notes[:6000] or "该版本没有发布说明。")
+        install_button = box.addButton("下载并安装", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is install_button:
+            self.download_update()
+
+    def _on_update_check_failed(self, message: str) -> None:
+        self.update_check_worker = None
+        self.update_status_label.setText("检查更新失败，不影响当前使用。")
+        if self._update_check_manual:
+            QMessageBox.warning(
+                self,
+                "检查更新失败",
+                f"{message}\n\n应用仍可正常使用。",
+            )
+
+    def download_update(self) -> None:
+        if self._update_info is None:
+            return
+        worker = self.update_download_worker
+        if worker is not None and worker.isRunning():
+            return
+
+        self.update_status_label.setText("正在下载更新...")
+        self.update_check_button.setEnabled(False)
+        worker = UpdateDownloadWorker(self._update_info, __version__)
+        self.update_download_worker = worker
+        worker.progress.connect(self._on_update_download_progress)
+        worker.completed.connect(self._on_update_download_completed)
+        worker.failed.connect(self._on_update_download_failed)
+        worker.finished.connect(lambda: self.update_check_button.setEnabled(True))
+        worker.finished.connect(worker.deleteLater)
+        worker.start()
+
+    def _on_update_download_progress(self, percent: int) -> None:
+        self.update_status_label.setText(f"正在下载更新... {percent}%")
+
+    def _on_update_download_completed(self, downloaded: DownloadedUpdate) -> None:
+        self.update_download_worker = None
+        self.update_status_label.setText("更新包已下载并通过校验。")
+        if not getattr(sys, "frozen", False):
+            QMessageBox.information(
+                self,
+                "更新包已准备",
+                f"开发模式不会替换源码目录。\n更新包已保存到：\n{downloaded.package_path}",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "安装更新",
+            f"版本 {downloaded.info.version} 已下载并通过 SHA-256 校验。\n"
+            "现在退出并安装更新吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            self.update_status_label.setText("更新已下载，稍后可重新检查。")
+            return
+
+        try:
+            launch_update(downloaded.package_path, pid=os.getpid())
+        except UpdateError as exc:
+            QMessageBox.warning(self, "启动更新失败", str(exc))
+            self.update_status_label.setText("更新未安装。")
+            return
+        self.status_label.setText("更新已准备，程序即将退出...")
+        self._shutdown()
+        QApplication.quit()
+
+    def _on_update_download_failed(self, message: str) -> None:
+        self.update_download_worker = None
+        self.update_status_label.setText("下载更新失败，不影响当前使用。")
+        QMessageBox.warning(
+            self,
+            "下载更新失败",
+            f"{message}\n\n应用仍可正常使用。",
+        )
+
     def _build_settings_page(self) -> QWidget:
         page = _page()
         outer = QHBoxLayout(page)
@@ -1565,6 +1690,25 @@ class MainWindow(QMainWindow):
         desc_lbl.setWordWrap(True)
         desc_lbl.setStyleSheet(f"color:{MUTED}; line-height:1.5; padding: 8px 0;")
         about_layout.addWidget(desc_lbl)
+        update_card = _card()
+        update_layout = QVBoxLayout(update_card)
+        update_layout.setContentsMargins(16, 14, 16, 14)
+        update_layout.setSpacing(6)
+        update_title = QLabel("软件更新")
+        update_title.setStyleSheet(f"color:{TEXT_SECONDARY};")
+        update_layout.addWidget(update_title)
+
+        update_row = QHBoxLayout()
+        self.update_status_label = QLabel("启动后自动检查最新稳定版")
+        self.update_status_label.setWordWrap(True)
+        self.update_status_label.setStyleSheet(f"color:{MUTED};")
+        update_row.addWidget(self.update_status_label, 1)
+        self.update_check_button = _ghost_button("检查更新")
+        self.update_check_button.clicked.connect(lambda: self.check_for_updates(True))
+        update_row.addWidget(self.update_check_button)
+        update_layout.addLayout(update_row)
+        about_layout.addWidget(update_card)
+
         tech_card = _card()
         tech_layout = QVBoxLayout(tech_card)
         tech_layout.setContentsMargins(16, 16, 16, 16)
