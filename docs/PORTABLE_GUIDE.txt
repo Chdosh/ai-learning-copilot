@@ -1,4 +1,4 @@
-AI Learning Copilot 0.6.0
+AI Learning Copilot 0.8.0
 Windows Portable 使用说明
 ========================================
 
