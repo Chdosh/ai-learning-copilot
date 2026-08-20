@@ -3,7 +3,7 @@
 P1-A 契约测试：定义 `KnowledgeBase.query_terms` 的接口行为。当前 `query_terms`
 尚未实现（P1-B），除契约形状外全部用例处于红灯状态，实现后转绿。
 
-覆盖方案 §6.11 验收标准：视图范围、基础词规则、方向三级回退、分层排序与封顶、
+覆盖方案 §6.11 验收标准：视图范围、基础词规则、方向精确归属、分层排序与封顶、
 来源去重、稳定分页、排序理由、领域统计语义。
 """
 from __future__ import annotations
@@ -88,9 +88,11 @@ def _ingest_basic_many_times(kb: KnowledgeBase, term: str, times: int) -> int:
 def test_query_contract_defaults() -> None:
     query = TermQuery()
     assert query.view == "focus"
+    assert query.sort == "latest"
     assert query.limit == 50
     assert query.current_context_id is None
     assert query.effective_domain == "通用"
+    assert query.since_at == ""
 
 
 def test_query_terms_returns_term_page(tmp_path: Path) -> None:
@@ -103,6 +105,39 @@ def test_query_terms_returns_term_page(tmp_path: Path) -> None:
     assert isinstance(item, TermViewItem)
     assert item.source_count == 1
     assert item.reasons
+
+
+def test_time_sort_defaults_latest_and_can_switch_to_oldest(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    old_capture = _capture(kb)
+    _ingest_term(kb, "OldTerm", domain="编程", capture_id=old_capture)
+    _set_capture_time(kb, old_capture, "2026-01-01T00:00:00")
+    new_capture = _capture(kb)
+    _ingest_term(kb, "NewTerm", domain="编程", capture_id=new_capture)
+    _set_capture_time(kb, new_capture, "2026-02-01T00:00:00")
+
+    latest = kb.query_terms(TermQuery(view="all"))
+    oldest = kb.query_terms(TermQuery(view="all", sort="oldest"))
+
+    assert [item.term.term for item in latest.items] == ["NewTerm", "OldTerm"]
+    assert [item.term.term for item in oldest.items] == ["OldTerm", "NewTerm"]
+
+
+def test_time_range_filters_by_latest_real_learning_time(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    old_capture = _capture(kb)
+    _ingest_term(kb, "OldTerm", domain="编程", capture_id=old_capture)
+    _set_capture_time(kb, old_capture, "2026-01-01T00:00:00")
+    new_capture = _capture(kb)
+    _ingest_term(kb, "NewTerm", domain="编程", capture_id=new_capture)
+    _set_capture_time(kb, new_capture, "2026-02-01T00:00:00")
+
+    page = kb.query_terms(
+        TermQuery(view="all", since_at="2026-01-15T00:00:00")
+    )
+
+    assert [item.term.term for item in page.items] == ["NewTerm"]
+    assert page.total == 1
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +217,7 @@ def test_favorited_sorts_above_higher_occurrence_term(tmp_path: Path) -> None:
         capture_id = _capture(kb)
         _ingest_term(kb, "Polymorphism", domain="编程", capture_id=capture_id)
 
-    page = kb.query_terms(TermQuery(view="focus"))
+    page = kb.query_terms(TermQuery(view="focus", sort="ranked"))
     assert [item.term.term for item in page.items][0] == "Vector"
 
 
@@ -196,7 +231,12 @@ def test_direction_levels_rank_exact_above_domain_above_none(tmp_path: Path) -> 
     _ingest_term(kb, "HTTP", domain="网络", capture_id=_capture(kb, other_context))
 
     page = kb.query_terms(
-        TermQuery(view="focus", current_context_id=context_id, effective_domain="编程")
+        TermQuery(
+            view="focus",
+            sort="ranked",
+            current_context_id=context_id,
+            effective_domain="编程",
+        )
     )
     assert [item.term.term for item in page.items] == ["Polymorphism", "Vector", "HTTP"]
 
@@ -206,7 +246,7 @@ def test_direction_levels_rank_exact_above_domain_above_none(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_current_direction_view_scopes_to_exact_and_legacy_domain(tmp_path: Path) -> None:
+def test_current_direction_view_scopes_to_exact_direction_only(tmp_path: Path) -> None:
     kb = _kb(tmp_path)
     context_id = kb.store.save_context(name="深度学习", domain="编程", scene="通用")
     other_context = kb.store.save_context(name="网络工程", domain="网络", scene="通用")
@@ -221,12 +261,12 @@ def test_current_direction_view_scopes_to_exact_and_legacy_domain(tmp_path: Path
     )
     included = {item.term.id for item in page.items}
     assert exact_id in included
-    assert legacy_id in included
-    assert impostor_id not in included  # 有非空其他 context 来源，不能凭同 domain 冒充
+    assert legacy_id not in included
+    assert impostor_id not in included
     assert unrelated_id not in included
 
 
-def test_current_direction_without_context_filters_by_effective_domain(tmp_path: Path) -> None:
+def test_current_direction_without_context_does_not_fall_back_to_domain(tmp_path: Path) -> None:
     kb = _kb(tmp_path)
     context_id = kb.store.save_context(name="深度学习", domain="编程", scene="通用")
     _ingest_term(kb, "Polymorphism", domain="编程", capture_id=_capture(kb, context_id))
@@ -236,10 +276,10 @@ def test_current_direction_without_context_filters_by_effective_domain(tmp_path:
     page = kb.query_terms(
         TermQuery(view="current_direction", current_context_id=None, effective_domain="编程")
     )
-    assert {item.term.term for item in page.items} == {"Polymorphism", "Vector"}
+    assert page.items == []
 
 
-def test_current_direction_view_allows_manual_term_without_sources(tmp_path: Path) -> None:
+def test_current_direction_excludes_manual_term_without_direction_source(tmp_path: Path) -> None:
     kb = _kb(tmp_path)
     context_id = kb.store.save_context(name="深度学习", domain="编程", scene="通用")
     kb.save_term(
@@ -253,9 +293,7 @@ def test_current_direction_view_allows_manual_term_without_sources(tmp_path: Pat
     page = kb.query_terms(
         TermQuery(view="current_direction", current_context_id=context_id, effective_domain="编程")
     )
-    manual = [item for item in page.items if item.term.term == "ManualWord"]
-    assert len(manual) == 1
-    assert manual[0].source_count == 0
+    assert all(item.term.term != "ManualWord" for item in page.items)
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +321,7 @@ def test_source_and_view_caps_bound_ranking(tmp_path: Path) -> None:
     for _ in range(_SORT_VIEW_CAP + 1):
         kb.record_view(capped_id)
 
-    page = kb.query_terms(TermQuery(view="focus"))
+    page = kb.query_terms(TermQuery(view="focus", sort="ranked"))
     order = [item.term.term for item in page.items]
     # 来源数都超过封顶后不再拉开差距，查看次数决定顺序
     assert order[0] == "Vector"
@@ -304,7 +342,7 @@ def test_view_cap_bounds_ranking_without_extra_advantage(tmp_path: Path) -> None
         kb.record_view(new_id)
     _set_capture_time(kb, new_capture, "2026-02-01T00:00:00")
 
-    page = kb.query_terms(TermQuery(view="focus"))
+    page = kb.query_terms(TermQuery(view="focus", sort="ranked"))
     order = [item.term.term for item in page.items]
     # 若查看次数不封顶，Polymorphism(10 次) 会排在 Vector(4 次) 前；
     # 封顶后两者打平，由最近来源时间决定。
@@ -387,6 +425,18 @@ def test_invalid_view_rejected(tmp_path: Path) -> None:
     kb = _kb(tmp_path)
     with pytest.raises(ValueError):
         kb.query_terms(TermQuery(view="bogus"))
+
+
+def test_invalid_sort_rejected(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    with pytest.raises(ValueError):
+        kb.query_terms(TermQuery(sort="bogus"))
+
+
+def test_invalid_time_filter_rejected(tmp_path: Path) -> None:
+    kb = _kb(tmp_path)
+    with pytest.raises(ValueError):
+        kb.query_terms(TermQuery(since_at="not-a-time"))
 
 
 def test_invalid_limit_and_offset_rejected(tmp_path: Path) -> None:

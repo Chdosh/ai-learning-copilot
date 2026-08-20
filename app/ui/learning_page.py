@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -35,6 +36,7 @@ from app.services.settings import SettingsService
 from app.ui.review import ReviewDialog
 from app.ui.theme import (
     BORDER,
+    BORDER_LIGHT,
     CARD,
     ChevronComboBox,
     FONT_MICRO,
@@ -49,6 +51,20 @@ from app.ui.theme import (
 )
 
 
+def _link_button_qss() -> str:
+    return f"""
+    QPushButton {{
+        background: transparent;
+        border: none;
+        padding: 2px 0;
+        color: {PRIMARY};
+        text-align: left;
+    }}
+    QPushButton:hover {{ color: {TEXT}; }}
+    QPushButton:pressed {{ color: {TEXT_SECONDARY}; }}
+    """
+
+
 def _card_title(text: str) -> QLabel:
     label = QLabel(text)
     label.setStyleSheet(
@@ -58,6 +74,16 @@ def _card_title(text: str) -> QLabel:
     label.setFixedHeight(22)
     label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     return label
+
+
+def _term_display_name(term: str, chinese_name: str) -> str:
+    primary = " ".join((term or "").split())
+    chinese = " ".join((chinese_name or "").split())
+    if not primary:
+        return chinese
+    if not chinese or primary.casefold() == chinese.casefold():
+        return primary
+    return f"{primary}（{chinese}）"
 
 
 class LearningPage(QWidget):
@@ -90,20 +116,41 @@ class LearningPage(QWidget):
         centered_layout.setContentsMargins(20, 16, 20, 16)
         centered_layout.addStretch(1)
         content = QWidget()
-        content.setMaximumWidth(640)
-        centered_layout.addWidget(content)
+        content.setMaximumWidth(1180)
+        content.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        centered_layout.addWidget(content, 100)
         centered_layout.addStretch(1)
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        self.content_layout = layout
+        columns = QHBoxLayout(content)
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.setSpacing(14)
+        self.content_widget = content
+        self.content_layout = columns
         self.accumulation_card = self._build_accumulation_card()
         self.review_card = self._build_review_card()
         self.tips_card = self._build_tips_card()
-        layout.addWidget(self.accumulation_card)
-        layout.addWidget(self.review_card)
-        layout.addWidget(self.tips_card)
-        layout.addStretch(1)
+        columns.addWidget(
+            self.accumulation_card,
+            1,
+            Qt.AlignmentFlag.AlignTop,
+        )
+        self.right_panel = QWidget()
+        self.right_panel.setMinimumWidth(230)
+        self.right_panel.setMaximumWidth(300)
+        self.right_panel.setStyleSheet("background: transparent;")
+        self.right_layout = QVBoxLayout(self.right_panel)
+        self.right_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_layout.setSpacing(12)
+        self.right_layout.addWidget(self.review_card)
+        self.right_layout.addWidget(self.tips_card)
+        self.right_layout.addStretch(1)
+        columns.addWidget(
+            self.right_panel,
+            0,
+            Qt.AlignmentFlag.AlignTop,
+        )
         scroll.setWidget(centered)
         outer.addWidget(scroll)
 
@@ -134,6 +181,7 @@ class LearningPage(QWidget):
         layout.addWidget(summary)
 
         self.accumulation_list = QWidget()
+        self.accumulation_list.setStyleSheet("background: transparent;")
         self.accumulation_list_layout = QVBoxLayout(self.accumulation_list)
         self.accumulation_list_layout.setContentsMargins(0, 0, 0, 0)
         self.accumulation_list_layout.setSpacing(6)
@@ -179,15 +227,14 @@ class LearningPage(QWidget):
         row = QFrame()
         row.setObjectName("accumulationRow")
         row.setStyleSheet(
-            f"QFrame#accumulationRow {{ background: {CARD}; border: 1px solid {BORDER}; "
-            f"border-radius: {RADIUS_MD}; }}"
+            f"QFrame#accumulationRow {{ background: transparent; border: none; "
+            f"border-bottom: 1px solid {BORDER_LIGHT}; border-radius: 0; }}"
         )
         box = QVBoxLayout(row)
-        box.setContentsMargins(10, 9, 10, 9)
-        box.setSpacing(5)
+        box.setContentsMargins(2, 10, 2, 12)
+        box.setSpacing(6)
 
-        names = [item.term.term.strip(), item.term.chinese_name.strip()]
-        title = QLabel(" · ".join(name for name in names if name))
+        title = QLabel(_term_display_name(item.term.term, item.term.chinese_name))
         title.setStyleSheet(
             f"color: {TEXT}; font-size: 14px; font-weight: 600; background: transparent;"
         )
@@ -210,6 +257,7 @@ class LearningPage(QWidget):
         meta.setStyleSheet(
             f"color: {MUTED}; font-size: {FONT_MICRO}; background: transparent;"
         )
+        meta.setWordWrap(True)
         box.addWidget(meta)
 
         reason = QLabel(" · ".join(item.reasons))
@@ -227,18 +275,29 @@ class LearningPage(QWidget):
         )
         source_button.setProperty("capture_id", item.latest_capture_id)
         source_button.setToolTip("回到这条知识最近出现的学习记录")
-        source_button.setStyleSheet(button_qss())
+        source_button.setStyleSheet(_link_button_qss())
+        source_button.setMinimumWidth(0)
+        source_button.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Fixed,
+        )
         source_button.clicked.connect(
             lambda checked=False, capture_id=item.latest_capture_id: (
                 self.capture_selected.emit(capture_id)
             )
         )
-        box.addWidget(source_button)
 
         # P1.5-C：相关知识（同来源共现），点击惰性加载，无 N+1
         related_button = QPushButton("相关知识")
         related_button.setProperty("related", True)
-        related_button.setStyleSheet(button_qss())
+        related_button.setStyleSheet(_link_button_qss())
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(12)
+        actions.addWidget(source_button, 1)
+        actions.addWidget(related_button, 0)
+        box.addLayout(actions)
+
         related_panel = QWidget()
         related_panel.setStyleSheet("background: transparent;")
         related_panel_layout = QVBoxLayout(related_panel)
@@ -250,7 +309,6 @@ class LearningPage(QWidget):
                 self._toggle_related(i, b, p)
             )
         )
-        box.addWidget(related_button)
         box.addWidget(related_panel)
         return row
 
@@ -273,12 +331,11 @@ class LearningPage(QWidget):
             layout = panel.layout()
             if page.items:
                 for related in page.items:
-                    names = [
-                        related.term.term.strip(),
-                        related.term.chinese_name.strip(),
-                    ]
                     label = QLabel(
-                        " · ".join(name for name in names if name)
+                        _term_display_name(
+                            related.term.term,
+                            related.term.chinese_name,
+                        )
                         + "　—　"
                         + " · ".join(related.reasons)
                     )
@@ -337,11 +394,10 @@ class LearningPage(QWidget):
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(6)
             if recommendation.term is not None:
-                names = [
-                    recommendation.term.term.strip(),
-                    recommendation.term.chinese_name.strip(),
-                ]
-                text = " · ".join(name for name in names if name)
+                text = _term_display_name(
+                    recommendation.term.term,
+                    recommendation.term.chinese_name,
+                )
             else:
                 text = "学习建议"
             label = QLabel(f"{text}　—　{recommendation.reason}")
@@ -418,6 +474,7 @@ class LearningPage(QWidget):
         layout.addLayout(header)
 
         self.tips_list = QWidget()
+        self.tips_list.setStyleSheet("background: transparent;")
         self.tips_list_layout = QVBoxLayout(self.tips_list)
         self.tips_list_layout.setContentsMargins(0, 0, 0, 0)
         self.tips_list_layout.setSpacing(6)
@@ -450,11 +507,11 @@ class LearningPage(QWidget):
         row = QFrame()
         row.setObjectName("tipRow")
         row.setStyleSheet(
-            f"QFrame#tipRow {{ background: {CARD}; border: 1px solid {BORDER}; "
-            f"border-radius: {RADIUS_MD}; }}"
+            f"QFrame#tipRow {{ background: transparent; border: none; "
+            f"border-bottom: 1px solid {BORDER_LIGHT}; border-radius: 0; }}"
         )
         box = QVBoxLayout(row)
-        box.setContentsMargins(10, 8, 10, 8)
+        box.setContentsMargins(2, 8, 2, 10)
         box.setSpacing(6)
 
         content = QLabel(tip.content)

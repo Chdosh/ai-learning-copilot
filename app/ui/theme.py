@@ -8,7 +8,7 @@
 """
 from __future__ import annotations
 
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPalette, QPen
 from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QPushButton, QWidget
 
 # ---- 色板（clean 风格） ----
@@ -297,6 +297,47 @@ class ChevronComboBox(QComboBox):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        popup_qss = f"""
+        QAbstractItemView {{
+            background: {CARD};
+            color: {TEXT_SECONDARY};
+            border: 1px solid {BORDER};
+            outline: 0;
+            padding: 2px;
+        }}
+        QAbstractItemView::item {{
+            min-height: 24px;
+            padding: 3px 8px;
+            color: {TEXT_SECONDARY};
+            background: {CARD};
+        }}
+        QAbstractItemView::item:hover,
+        QAbstractItemView::item:selected {{
+            background: {PRIMARY_SOFT};
+            color: {PRIMARY};
+        }}
+        """
+        self.view().setStyleSheet(popup_qss)
+        palette = self.view().palette()
+        palette.setColor(QPalette.ColorRole.Base, QColor(CARD))
+        palette.setColor(QPalette.ColorRole.Window, QColor(CARD))
+        palette.setColor(QPalette.ColorRole.Text, QColor(TEXT_SECONDARY))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(PRIMARY_SOFT))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor(PRIMARY))
+        self.view().setPalette(palette)
+        self.view().setAutoFillBackground(True)
+        self.view().viewport().setPalette(palette)
+        self.view().viewport().setAutoFillBackground(True)
+
+    def showPopup(self) -> None:  # noqa: N802
+        super().showPopup()
+        popup = self.view().window()
+        palette = popup.palette()
+        palette.setColor(QPalette.ColorRole.Window, QColor(CARD))
+        palette.setColor(QPalette.ColorRole.Base, QColor(CARD))
+        popup.setPalette(palette)
+        popup.setAutoFillBackground(True)
+        popup.setStyleSheet(f"background: {CARD};")
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)

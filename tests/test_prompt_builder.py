@@ -13,9 +13,19 @@ def test_build_user_prompt_contains_source_text() -> None:
     assert "Token limit exceeded." in prompt
     assert '"translation"' in prompt
     assert '"terms"' in prompt
-    assert "terms 必须提取并解释" in prompt
+    assert "terms 必须完整覆盖" in prompt
     assert '"learning_tip"' in prompt
     assert '"examples"' in prompt
+
+
+def test_prompt_requires_list_items_to_be_covered_individually() -> None:
+    prompt = build_user_prompt("即时出现、重试幂等、来源回看、关联理由、推荐排除与忽略持久化")
+
+    assert "必须逐项检查" in prompt
+    assert "每个独立概念分别生成一条 term" in prompt
+    assert "与 / 和" in prompt
+    assert "不能通过减少 terms 数量" in prompt
+    assert "原文术语已经是中文" in prompt
 
 
 def test_prompts_keep_terms_and_make_extra_advice_optional() -> None:
@@ -25,7 +35,7 @@ def test_prompts_keep_terms_and_make_extra_advice_optional() -> None:
     )
 
     assert '"terms"' in prompt
-    assert "terms 必须解释" in prompt
+    assert "terms 必须完整覆盖" in prompt
     assert '"learning_tip"' in prompt
     assert "仅在确有补充价值时填写" in prompt
 
@@ -122,6 +132,28 @@ def test_parse_ai_result_preserves_complete_structure() -> None:
     assert all(term.beginner_explanation == "解释" * 60 for term in result.terms)
     assert result.tags == ["一", "二", "三"]
     assert result.learning_tip == "不应进入首轮结果"
+
+
+def test_parse_ai_result_drops_duplicate_chinese_name() -> None:
+    result = parse_ai_result(
+        {
+            "terms": [
+                {
+                    "term": "幂等",
+                    "chinese_name": "幂等",
+                    "beginner_explanation": "重复执行结果一致。",
+                },
+                {
+                    "term": "Idempotency",
+                    "chinese_name": "幂等性",
+                    "beginner_explanation": "重复执行结果一致。",
+                },
+            ]
+        }
+    )
+
+    assert result.terms[0].chinese_name == ""
+    assert result.terms[1].chinese_name == "幂等性"
 
 
 def test_render_context_block() -> None:

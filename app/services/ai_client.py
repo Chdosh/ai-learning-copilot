@@ -391,10 +391,16 @@ def parse_ai_result(value: dict[str, Any], raw_response: dict[str, Any] | None =
         examples = item.get("examples")
         if not isinstance(examples, list):
             examples = []
+        term_text = str(item.get("term") or "").strip()
+        chinese_name = str(item.get("chinese_name") or "").strip()
+        normalized_term = " ".join(term_text.split()).casefold()
+        normalized_chinese_name = " ".join(chinese_name.split()).casefold()
+        if normalized_term == normalized_chinese_name:
+            chinese_name = ""
         terms.append(
             TermExplanation(
-                term=str(item.get("term") or "").strip(),
-                chinese_name=str(item.get("chinese_name") or "").strip(),
+                term=term_text,
+                chinese_name=chinese_name,
                 beginner_explanation=str(
                     item.get("beginner_explanation") or ""
                 ).strip(),

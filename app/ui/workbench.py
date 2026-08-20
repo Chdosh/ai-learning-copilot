@@ -50,6 +50,7 @@ from app.ui.theme import (
     BORDER,
     BORDER_LIGHT,
     CARD,
+    ChevronComboBox,
     DANGER,
     DISABLED,
     FONT_MICRO,
@@ -233,70 +234,116 @@ class WorkbenchPage(QWidget):
         centered_layout.setContentsMargins(20, 16, 20, 16)
         centered_layout.addStretch(1)
         content = QWidget()
-        content.setMaximumWidth(640)
-        centered_layout.addWidget(content)
+        content.setMaximumWidth(1120)
+        centered_layout.addWidget(content, 100)
         centered_layout.addStretch(1)
-        columns = QVBoxLayout(content)
+        columns = QHBoxLayout(content)
         columns.setContentsMargins(0, 0, 0, 0)
-        columns.setSpacing(12)
+        columns.setSpacing(16)
+        self.content_widget = content
+        self.content_layout = columns
 
-        card = self._build_card()
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(16, 14, 16, 16)
-        card_layout.setSpacing(10)
+        # 左侧只承担快速切换：预设选择即生效，不出现编辑/保存动作。
+        self.quick_card = self._build_card("quickDirectionCard")
+        quick_layout = QVBoxLayout(self.quick_card)
+        quick_layout.setContentsMargins(16, 14, 16, 16)
+        quick_layout.setSpacing(10)
+        quick_layout.addWidget(_card_title("快速方向"))
 
-        header_row = QHBoxLayout()
-        header_row.setSpacing(8)
-        header_row.addWidget(_card_title("学习方向"))
-        header_row.addStretch(1)
         self.direction_status_label = QLabel("当前生效：通用（临时）")
-        self.direction_status_label.setStyleSheet(f"color: {MUTED}; font-size: 13px;")
-        header_row.addWidget(self.direction_status_label)
+        self.direction_status_label.setStyleSheet(
+            f"color: {TEXT_SECONDARY}; font-size: 13px; font-weight: 600;"
+        )
+        self.direction_status_label.setWordWrap(True)
+        quick_layout.addWidget(self.direction_status_label)
+
+        quick_help = QLabel("选择预设后立即用于下一次截图，不需要再点应用。")
+        quick_help.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        quick_help.setWordWrap(True)
+        quick_layout.addWidget(quick_help)
+
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(10)
+        self.quick_domain_combo = self._build_preset_combo(PRESET_DOMAINS, "选择预设领域")
+        self.quick_scene_combo = self._build_preset_combo(PRESET_SCENES, "选择预设场景")
+        self.quick_domain_combo.activated.connect(self._apply_quick_preset)
+        self.quick_scene_combo.activated.connect(self._apply_quick_preset)
+        preset_row.addWidget(self.quick_domain_combo, 1)
+        preset_row.addWidget(self.quick_scene_combo, 1)
+        quick_layout.addLayout(preset_row)
+
         self.reset_direction_button = QPushButton("恢复通用")
         self.reset_direction_button.setStyleSheet(button_qss())
         self.reset_direction_button.setToolTip("清空当前方向，回到通用解释")
         self.reset_direction_button.clicked.connect(self._reset_direction)
-        header_row.addWidget(self.reset_direction_button)
-        card_layout.addLayout(header_row)
+        quick_layout.addWidget(self.reset_direction_button, 0, Qt.AlignmentFlag.AlignLeft)
 
-        form_row = QHBoxLayout()
-        form_row.setSpacing(12)
-        domain_column = QWidget()
-        domain_layout = QVBoxLayout(domain_column)
-        domain_layout.setContentsMargins(0, 0, 0, 0)
-        domain_layout.setSpacing(4)
-        domain_title = QLabel("领域")
-        domain_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        domain_layout.addWidget(domain_title)
-        self.domain_combo = self._build_editable_combo(PRESET_DOMAINS, "领域可直接输入自定义值")
-        self.domain_combo.setMinimumWidth(180)
-        self.domain_combo.setMaximumWidth(220)
-        self.domain_combo.currentTextChanged.connect(self._on_form_edited)
-        domain_layout.addWidget(self.domain_combo)
-        form_row.addWidget(domain_column)
-        form_row.addStretch(1)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet(f"color: {BORDER_LIGHT};")
+        quick_layout.addWidget(separator)
 
-        scene_column = QWidget()
-        scene_layout = QVBoxLayout(scene_column)
-        scene_layout.setContentsMargins(0, 0, 0, 0)
-        scene_layout.setSpacing(4)
-        scene_title = QLabel("场景")
-        scene_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        scene_layout.addWidget(scene_title)
-        self.scene_combo = self._build_editable_combo(PRESET_SCENES, "场景可直接输入自定义值")
-        self.scene_combo.setMinimumWidth(180)
-        self.scene_combo.setMaximumWidth(220)
-        self.scene_combo.currentTextChanged.connect(self._on_form_edited)
-        scene_layout.addWidget(self.scene_combo)
-        form_row.addWidget(scene_column)
-        card_layout.addLayout(form_row)
+        saved_title = QLabel("已保存的方向")
+        saved_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-weight: 600;")
+        quick_layout.addWidget(saved_title)
+        self.direction_list = QListWidget()
+        self.direction_list.setObjectName("directionList")
+        self.direction_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.direction_list.setStyleSheet(
+            f"""
+            QListWidget#directionList {{ background: transparent; border: none; outline: 0; }}
+            QListWidget#directionList::item {{
+                background: transparent;
+                border: none;
+                padding: 0;
+            }}
+            QListWidget#directionList::item:selected {{ background: {PRIMARY_SOFT}; border-radius: 6px; }}
+            """
+        )
+        self.direction_list.setMaximumHeight(260)
+        self.direction_list.itemClicked.connect(self._on_direction_item_clicked)
+        quick_layout.addWidget(self.direction_list)
 
-        self.advanced_toggle = QPushButton("高级选项")
+        repair_row = QHBoxLayout()
+        repair_row.setSpacing(8)
+        self.repair_notice_label = QLabel("")
+        self.repair_notice_label.setStyleSheet(f"color: {DANGER}; font-size: {FONT_MICRO};")
+        self.repair_notice_label.setWordWrap(True)
+        self.repair_button = QPushButton("整理")
+        self.repair_button.setStyleSheet(button_qss())
+        self.repair_button.clicked.connect(self._repair_directions)
+        self.repair_button.setVisible(False)
+        repair_row.addWidget(self.repair_notice_label, 1)
+        repair_row.addWidget(self.repair_button)
+        quick_layout.addLayout(repair_row)
+        quick_layout.addStretch(1)
+
+        # 右侧才放自定义、编辑、保存和智能识别，避免污染预设路径。
+        self.custom_card = self._build_card("customDirectionCard")
+        custom_layout = QVBoxLayout(self.custom_card)
+        custom_layout.setContentsMargins(16, 14, 16, 16)
+        custom_layout.setSpacing(10)
+        custom_layout.addWidget(_card_title("自定义与智能识别"))
+        custom_help = QLabel("需要自定义名称、回答偏好，或让系统从一段内容判断领域与场景时再展开。")
+        custom_help.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        custom_help.setWordWrap(True)
+        custom_layout.addWidget(custom_help)
+
+        entry_row = QHBoxLayout()
+        entry_row.setSpacing(8)
+        self.advanced_toggle = QPushButton("自定义方向")
         self.advanced_toggle.setCheckable(True)
         self.advanced_toggle.setStyleSheet(button_qss())
-        self.advanced_toggle.setToolTip("方向名称 / 摘要分析 / 背景要点 / 回答偏好")
+        self.advanced_toggle.setToolTip("展开自定义方向编辑器")
         self.advanced_toggle.toggled.connect(self._toggle_advanced)
-        card_layout.addWidget(self.advanced_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        entry_row.addWidget(self.advanced_toggle)
+        self.smart_detect_button = QPushButton("智能识别场景")
+        self.smart_detect_button.setStyleSheet(button_qss())
+        self.smart_detect_button.setToolTip("粘贴摘要或内容，由系统建议领域与场景")
+        self.smart_detect_button.clicked.connect(self._open_smart_detection)
+        entry_row.addWidget(self.smart_detect_button)
+        entry_row.addStretch(1)
+        custom_layout.addLayout(entry_row)
 
         self.advanced_panel = QWidget()
         self.advanced_panel.setObjectName("advancedPanel")
@@ -307,6 +354,35 @@ class WorkbenchPage(QWidget):
         advanced_layout = QVBoxLayout(self.advanced_panel)
         advanced_layout.setContentsMargins(0, 2, 0, 0)
         advanced_layout.setSpacing(8)
+
+        form_row = QHBoxLayout()
+        form_row.setSpacing(10)
+        domain_column = QWidget()
+        domain_column.setStyleSheet("background: transparent;")
+        domain_layout = QVBoxLayout(domain_column)
+        domain_layout.setContentsMargins(0, 0, 0, 0)
+        domain_layout.setSpacing(4)
+        domain_title = QLabel("领域")
+        domain_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        domain_layout.addWidget(domain_title)
+        self.domain_combo = self._build_editable_combo(PRESET_DOMAINS, "可选择或输入自定义领域")
+        self.domain_combo.currentTextChanged.connect(self._on_form_edited)
+        domain_layout.addWidget(self.domain_combo)
+        form_row.addWidget(domain_column, 1)
+
+        scene_column = QWidget()
+        scene_column.setStyleSheet("background: transparent;")
+        scene_layout = QVBoxLayout(scene_column)
+        scene_layout.setContentsMargins(0, 0, 0, 0)
+        scene_layout.setSpacing(4)
+        scene_title = QLabel("场景")
+        scene_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        scene_layout.addWidget(scene_title)
+        self.scene_combo = self._build_editable_combo(PRESET_SCENES, "可选择或输入自定义场景")
+        self.scene_combo.currentTextChanged.connect(self._on_form_edited)
+        scene_layout.addWidget(self.scene_combo)
+        form_row.addWidget(scene_column, 1)
+        advanced_layout.addLayout(form_row)
 
         name_title = QLabel("方向名称（可选）")
         name_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
@@ -387,12 +463,12 @@ class WorkbenchPage(QWidget):
         advanced_layout.addWidget(self.instruction_input)
 
         self.advanced_panel.setVisible(False)
-        card_layout.addWidget(self.advanced_panel)
+        custom_layout.addWidget(self.advanced_panel)
 
         self.draft_warning_label = QLabel("有未保存修改，不会用于下一次识别")
         self.draft_warning_label.setStyleSheet(f"color: {DANGER}; font-size: {FONT_MICRO};")
         self.draft_warning_label.setVisible(False)
-        card_layout.addWidget(self.draft_warning_label)
+        custom_layout.addWidget(self.draft_warning_label)
 
         actions_row = QHBoxLayout()
         actions_row.setSpacing(8)
@@ -410,65 +486,42 @@ class WorkbenchPage(QWidget):
         self.cancel_edit_button.clicked.connect(self._cancel_edit)
         self.cancel_edit_button.setVisible(False)
         actions_row.addWidget(self.cancel_edit_button)
+        self.delete_edit_button = QPushButton("删除此方向")
+        self.delete_edit_button.setObjectName("dangerButton")
+        self.delete_edit_button.setStyleSheet(button_qss())
+        self.delete_edit_button.clicked.connect(self._delete_editing_direction)
+        self.delete_edit_button.setVisible(False)
+        actions_row.addWidget(self.delete_edit_button)
         actions_row.addStretch(1)
-        card_layout.addLayout(actions_row)
+        advanced_layout.addLayout(actions_row)
+        custom_layout.addStretch(1)
 
-        separator = QFrame()
-        separator.setFrameShape(QFrame.Shape.HLine)
-        separator.setStyleSheet(f"color: {BORDER};")
-        card_layout.addWidget(separator)
-
-        saved_title = QLabel("已保存的方向")
-        saved_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-weight: 600;")
-        card_layout.addWidget(saved_title)
-        self.direction_list = QListWidget()
-        self.direction_list.setObjectName("directionList")
-        self.direction_list.setFrameShape(QFrame.Shape.NoFrame)
-        self.direction_list.setStyleSheet(
-            f"""
-            QListWidget#directionList {{ background: transparent; border: none; outline: 0; }}
-            QListWidget#directionList::item {{
-                background: transparent;
-                border: none;
-                padding: 0;
-            }}
-            QListWidget#directionList::item:selected {{ background: {PRIMARY_SOFT}; border-radius: 6px; }}
-            """
-        )
-        self.direction_list.setMaximumHeight(180)
-        self.direction_list.itemClicked.connect(self._on_direction_item_clicked)
-        card_layout.addWidget(self.direction_list)
-
-        repair_row = QHBoxLayout()
-        repair_row.setSpacing(8)
-        self.repair_notice_label = QLabel("")
-        self.repair_notice_label.setStyleSheet(f"color: {DANGER}; font-size: {FONT_MICRO};")
-        self.repair_notice_label.setWordWrap(True)
-        self.repair_button = QPushButton("整理")
-        self.repair_button.setStyleSheet(button_qss())
-        self.repair_button.clicked.connect(self._repair_directions)
-        self.repair_button.setVisible(False)
-        repair_row.addWidget(self.repair_notice_label, 1)
-        repair_row.addWidget(self.repair_button)
-        card_layout.addLayout(repair_row)
-
-        columns.addWidget(card, 1)
+        columns.addWidget(self.quick_card, 5, Qt.AlignmentFlag.AlignTop)
+        columns.addWidget(self.custom_card, 6, Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(centered)
         outer.addWidget(scroll)
 
-    def _build_card(self) -> QFrame:
+    def _build_card(self, object_name: str = "workbenchCard") -> QFrame:
         card = QFrame()
-        card.setObjectName("workbenchCard")
+        card.setObjectName(object_name)
         card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         card.setStyleSheet(
-            f"QFrame#workbenchCard {{ background: {CARD}; border: 1px solid {BORDER}; "
+            f"QFrame#{object_name} {{ background: {CARD}; border: 1px solid {BORDER}; "
             f"border-radius: {RADIUS_LG}; }}"
         )
         return card
 
     @staticmethod
+    def _build_preset_combo(presets: list[str], tooltip: str) -> ChevronComboBox:
+        combo = ChevronComboBox()
+        combo.addItems(presets)
+        combo.setMinimumHeight(34)
+        combo.setToolTip(tooltip)
+        return combo
+
+    @staticmethod
     def _build_editable_combo(presets: list[str], tooltip: str) -> QComboBox:
-        combo = QComboBox()
+        combo = ChevronComboBox()
         combo.setEditable(True)
         combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         combo.addItems(presets)
@@ -478,7 +531,18 @@ class WorkbenchPage(QWidget):
 
     def _toggle_advanced(self, checked: bool) -> None:
         self.advanced_panel.setVisible(checked)
-        self.advanced_toggle.setText("收起高级选项" if checked else "高级选项")
+        self.advanced_toggle.setText("收起自定义" if checked else "自定义方向")
+
+    def _open_smart_detection(self) -> None:
+        self.advanced_toggle.setChecked(True)
+        self.context_source_input.setFocus()
+
+    def _apply_quick_preset(self, *args) -> None:
+        domain = self.quick_domain_combo.currentText().strip() or "通用"
+        scene = self.quick_scene_combo.currentText().strip() or "通用"
+        self.settings_service.set_quick_context(domain, scene)
+        self.context_changed.emit(None)
+        self.refresh_directions()
 
     # ---- 表单值 ----
 
@@ -651,6 +715,10 @@ class WorkbenchPage(QWidget):
         self._editing_context_id = None
         self.refresh_directions(force=True)
 
+    def _delete_editing_direction(self) -> None:
+        if self._editing_context_id is not None:
+            self._delete_direction(self._editing_context_id)
+
     def _reset_direction(self) -> None:
         """恢复通用方向：只改当前指向，不删除任何已保存方向。"""
         self.settings_service.set_quick_context("通用", "通用")
@@ -673,6 +741,7 @@ class WorkbenchPage(QWidget):
             return
         self._editing_context_id = record.id
         self._load_form(record)
+        self.advanced_toggle.setChecked(True)
         self._sync_action_buttons()
 
     def _delete_direction(self, context_id: int) -> None:
@@ -711,10 +780,12 @@ class WorkbenchPage(QWidget):
             self.apply_direction_button.setText("保存修改并应用")
             self.save_as_new_button.setText("另存为新方向")
             self.cancel_edit_button.setVisible(True)
+            self.delete_edit_button.setVisible(True)
         else:
             self.apply_direction_button.setText("应用为当前方向")
             self.save_as_new_button.setText("保存为新方向")
             self.cancel_edit_button.setVisible(False)
+            self.delete_edit_button.setVisible(False)
 
     # ---- 已保存方向列表 ----
 
@@ -728,9 +799,10 @@ class WorkbenchPage(QWidget):
             name_counts[label] = name_counts.get(label, 0) + 1
         self.direction_list.clear()
         if not records:
-            placeholder = QListWidgetItem("还没有保存的方向——填好领域 / 场景后点「保存为新方向」")
+            placeholder = QListWidgetItem("还没有保存的方向，可在右侧创建自定义方向")
             placeholder.setFlags(placeholder.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             self.direction_list.addItem(placeholder)
+            self.direction_list.setFixedHeight(42)
             return
         for record in records:
             display = _record_display(record)
@@ -742,6 +814,11 @@ class WorkbenchPage(QWidget):
             item.setSizeHint(QSize(0, row_widget.sizeHint().height()))
             self.direction_list.addItem(item)
             self.direction_list.setItemWidget(item, row_widget)
+        total_height = sum(
+            self.direction_list.item(index).sizeHint().height()
+            for index in range(self.direction_list.count())
+        )
+        self.direction_list.setFixedHeight(min(220, max(42, total_height + 4)))
 
     def _build_direction_row(
         self,
@@ -768,26 +845,12 @@ class WorkbenchPage(QWidget):
             )
             layout.addWidget(badge)
 
-        use_button = QPushButton("使用")
-        use_button.setStyleSheet(_ROW_BUTTON_QSS)
-        use_button.clicked.connect(
-            lambda checked=False, cid=record.id: self._switch_to(cid)
-        )
-        layout.addWidget(use_button)
-
         edit_button = QPushButton("编辑")
         edit_button.setStyleSheet(_ROW_BUTTON_QSS)
         edit_button.clicked.connect(
             lambda checked=False, cid=record.id: self._edit_direction(cid)
         )
         layout.addWidget(edit_button)
-
-        delete_button = QPushButton("删除")
-        delete_button.setStyleSheet(_ROW_BUTTON_QSS)
-        delete_button.clicked.connect(
-            lambda checked=False, cid=record.id: self._delete_direction(cid)
-        )
-        layout.addWidget(delete_button)
         return row
 
     def _on_direction_item_clicked(self, item: QListWidgetItem) -> None:
@@ -891,13 +954,21 @@ class WorkbenchPage(QWidget):
         if current is not None:
             display = _record_display(current)
             source = "已保存"
+            effective_domain = current.domain or "通用"
+            effective_scene = current.scene or "通用"
         else:
             display = _direction_name(quick_domain, quick_scene)
             source = "临时"
+            effective_domain = quick_domain
+            effective_scene = quick_scene
         self.direction_status_label.setText(f"当前生效：{display}（{source}）")
         self.reset_direction_button.setEnabled(
             current is not None or quick_domain != "通用" or quick_scene != "通用"
         )
+        domain_index = self.quick_domain_combo.findText(effective_domain)
+        scene_index = self.quick_scene_combo.findText(effective_scene)
+        self.quick_domain_combo.setCurrentIndex(max(0, domain_index))
+        self.quick_scene_combo.setCurrentIndex(max(0, scene_index))
 
         if self._editing_context_id is not None:
             record = self.history_store.get_context(self._editing_context_id)
