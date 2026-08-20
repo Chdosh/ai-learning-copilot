@@ -5,6 +5,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from app.services.history_store import HistoryStore
@@ -16,6 +17,7 @@ from app.services.knowledge_base import (
 )
 from app.services.settings import SettingsService
 from app.ui.learning_page import LearningPage
+from app.ui.theme import CARD
 
 
 def _page(tmp_path):
@@ -50,9 +52,28 @@ def test_learning_page_puts_accumulation_before_review_and_tips(tmp_path) -> Non
     store, service, kb, page = _page(tmp_path)
 
     assert page.content_layout.indexOf(page.accumulation_card) == 0
-    assert page.content_layout.indexOf(page.review_card) == 1
-    assert page.content_layout.indexOf(page.tips_card) == 2
+    assert page.content_layout.indexOf(page.right_panel) == 1
+    assert page.right_layout.indexOf(page.review_card) == 0
+    assert page.right_layout.indexOf(page.tips_card) == 1
+    assert page.content_widget.maximumWidth() == 1180
 
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_learning_filter_popup_has_explicit_white_background(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store, service, kb, page = _page(tmp_path)
+    page.show()
+    page.tips_scope_combo.showPopup()
+    app.processEvents()
+
+    view = page.tips_scope_combo.view()
+    assert view.palette().color(QPalette.ColorRole.Base) == QColor(CARD)
+    assert view.viewport().palette().color(QPalette.ColorRole.Base) == QColor(CARD)
+    assert CARD in view.window().styleSheet()
+
+    page.tips_scope_combo.hidePopup()
     page.deleteLater()
     app.processEvents()
 
@@ -90,7 +111,7 @@ def test_learning_page_renders_recent_accumulation_and_emits_source(tmp_path) ->
     visible_text = "\n".join(
         label.text() for label in page.accumulation_list.findChildren(QLabel)
     )
-    assert "Index · 索引" in visible_text
+    assert "Index（索引）" in visible_text
     assert "帮助数据库更快定位数据。" in visible_text
     assert "数据库 · 积累于 " in visible_text
     assert "1 条来源" in visible_text
@@ -101,6 +122,45 @@ def test_learning_page_renders_recent_accumulation_and_emits_source(tmp_path) ->
     assert "SQL index avoids a full table scan" in source_buttons[0].text()
     source_buttons[0].click()
     assert selected == [capture_id]
+
+    page.deleteLater()
+    app.processEvents()
+
+
+def test_learning_page_does_not_repeat_identical_term_names(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store, service, kb, page = _page(tmp_path)
+    capture_id = store.save_capture(
+        image_path="",
+        source_text="重试幂等",
+        translation="",
+        explanation="",
+        domain="计算机科学",
+    )
+    kb.ingest(
+        KnowledgeIngest(
+            capture_id=capture_id,
+            terms=[
+                {
+                    "term": "幂等",
+                    "chinese_name": "幂等",
+                    "beginner_explanation": "重复执行结果一致。",
+                    "domain": "计算机科学",
+                }
+            ],
+            domain="计算机科学",
+        )
+    )
+
+    page.refresh()
+    app.processEvents()
+    first_row = page.accumulation_list_layout.itemAt(0).widget()
+    title = first_row.findChildren(QLabel)[0]
+    assert title.text() == "幂等"
+    assert "·" not in title.text()
+    assert "border: none" in first_row.styleSheet()
+    source_button = _accumulation_source_buttons(page)[0]
+    assert "border: none" in source_button.styleSheet()
 
     page.deleteLater()
     app.processEvents()

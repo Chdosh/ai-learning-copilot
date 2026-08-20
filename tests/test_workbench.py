@@ -6,10 +6,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import app.ui.main_window as main_window_module
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from app.services.history_store import HistoryStore
-from app.services.knowledge_base import KnowledgeBase, SaveTermCommand
+from app.services.knowledge_base import KnowledgeBase, KnowledgeIngest, SaveTermCommand
 from app.services.settings import SettingsService
 from app.ui.main_window import MainWindow
 from app.ui.overview import OverviewPage
@@ -495,7 +496,7 @@ def test_workbench_advanced_panel_is_collapsed_by_default(tmp_path) -> None:
     workbench = WorkbenchPage(store, SettingsService(store))
 
     assert workbench.advanced_panel.isHidden()
-    assert workbench.advanced_toggle.text() == "高级选项"
+    assert workbench.advanced_toggle.text() == "自定义方向"
     workbench.advanced_toggle.click()
     assert not workbench.advanced_panel.isHidden()
     assert "收起" in workbench.advanced_toggle.text()
@@ -572,8 +573,6 @@ def test_workbench_no_longer_contains_removed_modules(tmp_path) -> None:
         "mode_screenshot_btn",
         "direction_edit_card",
         "direction_status_card",
-        "quick_domain_combo",
-        "quick_scene_combo",
         "apply_quick_button",
         "direction_selector",
         "new_direction_button",
@@ -587,6 +586,88 @@ def test_workbench_no_longer_contains_removed_modules(tmp_path) -> None:
         assert not hasattr(workbench, attribute), f"workbench still exposes {attribute}"
     assert hasattr(workbench, "direction_list")
     assert hasattr(workbench, "advanced_panel")
+    assert hasattr(workbench, "quick_domain_combo")
+    assert hasattr(workbench, "quick_scene_combo")
+    workbench.deleteLater()
+    app.processEvents()
+
+
+def test_workbench_splits_quick_and_custom_paths(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = HistoryStore(tmp_path / "app.db")
+    workbench = WorkbenchPage(store, SettingsService(store))
+
+    assert workbench.content_widget.maximumWidth() == 1120
+    assert workbench.content_layout.indexOf(workbench.quick_card) == 0
+    assert workbench.content_layout.indexOf(workbench.custom_card) == 1
+    assert not workbench.quick_domain_combo.isEditable()
+    assert not workbench.quick_scene_combo.isEditable()
+    assert workbench.domain_combo.isEditable()
+    assert workbench.scene_combo.isEditable()
+    assert "transparent" in workbench.domain_combo.parentWidget().styleSheet()
+    assert "transparent" in workbench.scene_combo.parentWidget().styleSheet()
+    assert workbench.advanced_panel.isAncestorOf(workbench.apply_direction_button)
+    assert workbench.advanced_panel.isAncestorOf(workbench.save_as_new_button)
+    assert workbench.advanced_panel.isAncestorOf(workbench.delete_edit_button)
+
+    workbench.show()
+    app.processEvents()
+    workbench.smart_detect_button.click()
+    app.processEvents()
+    assert not workbench.advanced_panel.isHidden()
+    assert workbench.context_source_input.hasFocus()
+    workbench.deleteLater()
+    app.processEvents()
+
+
+def test_workbench_quick_preset_opens_and_applies_immediately(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = HistoryStore(tmp_path / "app.db")
+    service = SettingsService(store)
+    workbench = WorkbenchPage(store, service)
+    workbench.show()
+    app.processEvents()
+
+    QTest.mouseClick(
+        workbench.quick_domain_combo,
+        Qt.MouseButton.LeftButton,
+        pos=workbench.quick_domain_combo.rect().center(),
+    )
+    app.processEvents()
+    assert workbench.quick_domain_combo.view().isVisible()
+    workbench.quick_domain_combo.hidePopup()
+
+    domain_index = workbench.quick_domain_combo.findText("生物")
+    scene_index = workbench.quick_scene_combo.findText("学术论文")
+    workbench.quick_domain_combo.setCurrentIndex(domain_index)
+    workbench.quick_domain_combo.activated.emit(domain_index)
+    workbench.quick_scene_combo.setCurrentIndex(scene_index)
+    workbench.quick_scene_combo.activated.emit(scene_index)
+
+    assert service.load().current_context_id is None
+    assert service.get_quick_context() == ("生物", "学术论文")
+    assert "生物 · 学术论文" in workbench.direction_status_label.text()
+    assert [c for c in store.list_contexts() if not c.builtin] == []
+    workbench.deleteLater()
+    app.processEvents()
+
+
+def test_saved_direction_row_uses_click_and_keeps_mutations_in_editor(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = HistoryStore(tmp_path / "app.db")
+    service = SettingsService(store)
+    context_id = store.save_context(name="论文精读", domain="生物", scene="学术论文")
+    workbench = WorkbenchPage(store, service)
+
+    item = workbench.direction_list.item(0)
+    row = workbench.direction_list.itemWidget(item)
+    assert [button.text() for button in row.findChildren(QPushButton)] == ["编辑"]
+
+    workbench._on_direction_item_clicked(item)
+    assert service.load().current_context_id == context_id
+    row.findChildren(QPushButton)[0].click()
+    assert not workbench.advanced_panel.isHidden()
+    assert not workbench.delete_edit_button.isHidden()
     workbench.deleteLater()
     app.processEvents()
 
@@ -614,6 +695,20 @@ def test_sidebar_navigation_order_and_screenshot_action(tmp_path, monkeypatch) -
     window = main_window_module.MainWindow()
     labels = [button.text() for button in window.nav_buttons]
     assert labels == ["获取", "学习", "术语本", "工作台", "设置"]
+    assert not hasattr(window, "terms_add_button")
+    assert not hasattr(window, "terms_review_button")
+    assert not hasattr(window, "_terms_view_buttons")
+    assert window.terms_time_combo.currentData() == ""
+    assert [
+        window.terms_time_combo.itemData(index)
+        for index in range(window.terms_time_combo.count())
+    ] == ["", "today", "7d", "30d"]
+    assert not hasattr(window, "terms_direction_combo")
+    assert [
+        window.terms_domain_combo.itemData(index)
+        for index in range(window.terms_domain_combo.count())
+    ] == [""]
+    assert window.terms_domain_combo.currentData() == ""
     capture_button = window.capture_sidebar_button
     sidebar_layout = window.nav_buttons[-1].parentWidget().layout()
 
@@ -628,7 +723,7 @@ def test_sidebar_navigation_order_and_screenshot_action(tmp_path, monkeypatch) -
     app.processEvents()
 
 
-def test_terms_page_refreshes_after_review_from_learning_page(tmp_path, monkeypatch) -> None:
+def test_review_lives_on_learning_page_not_terms_page(tmp_path, monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     store = HistoryStore(tmp_path / "app.db")
     knowledge_base = KnowledgeBase(store)
@@ -641,7 +736,7 @@ def test_terms_page_refreshes_after_review_from_learning_page(tmp_path, monkeypa
     monkeypatch.setattr(main_window_module.MainWindow, "_start_hotkey", lambda self: None)
 
     window = main_window_module.MainWindow()
-    assert window.terms_review_button.text() == "今日复习 (1)"
+    assert not hasattr(window, "terms_review_button")
 
     def review_once(dialog):
         dialog.knowledge_base.review(term.id, 2)
@@ -652,7 +747,134 @@ def test_terms_page_refreshes_after_review_from_learning_page(tmp_path, monkeypa
     assert knowledge_base.count_due_terms() == 0
 
     window._switch_page(2)
-    assert window.terms_review_button.text() == "今日复习"
+    assert not hasattr(window, "terms_review_button")
+
+    window.close()
+    app.processEvents()
+
+
+def test_terms_filters_share_one_row_without_overlap(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = HistoryStore(tmp_path / "app.db")
+    monkeypatch.setattr(main_window_module, "HistoryStore", lambda: store)
+    monkeypatch.setattr(main_window_module, "ensure_app_dirs", lambda: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_build_tray", lambda self: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_start_hotkey", lambda self: None)
+
+    window = main_window_module.MainWindow()
+    window._switch_page(2)
+    window.show()
+    for width, height in ((855, 550), (710, 455)):
+        window.resize(width, height)
+        app.processEvents()
+        controls = [
+            window.terms_search,
+            window.terms_time_combo,
+            window.terms_domain_combo,
+        ]
+        assert len({control.geometry().center().y() for control in controls}) == 1
+        assert controls[0].geometry().right() < controls[1].geometry().left()
+        assert controls[1].geometry().right() < controls[2].geometry().left()
+        assert (
+            controls[2].geometry().right()
+            <= window.terms_table_card.contentsRect().right()
+        )
+        assert (
+            window.terms_table_card.geometry().right()
+            < window.terms_detail_panel.geometry().left()
+        )
+
+    window.close()
+    app.processEvents()
+
+
+def test_terms_page_renders_real_source_and_defaults_to_latest(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = HistoryStore(tmp_path / "app.db")
+    knowledge_base = KnowledgeBase(store)
+    capture_id = store.save_capture(
+        image_path="",
+        source_text="SQL index avoids a full table scan",
+        translation="",
+        explanation="",
+        domain="数据库",
+    )
+    knowledge_base.ingest(
+        KnowledgeIngest(
+            capture_id=capture_id,
+            terms=[{"term": "Index", "domain": "数据库"}],
+            domain="数据库",
+        )
+    )
+
+    monkeypatch.setattr(main_window_module, "HistoryStore", lambda: store)
+    monkeypatch.setattr(main_window_module, "ensure_app_dirs", lambda: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_build_tray", lambda self: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_start_hotkey", lambda self: None)
+
+    window = main_window_module.MainWindow()
+    assert window.terms_time_combo.currentData() == ""
+    assert window.terms_domain_combo.currentData() == ""
+    assert window.terms_domain_combo.findData("数据库") >= 0
+    assert window.term_sources_list.count() == 1
+    assert "SQL index avoids" in window.term_sources_list.item(0).text()
+
+    window.close()
+    app.processEvents()
+
+
+def test_terms_domain_filter_uses_term_classification(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    store = HistoryStore(tmp_path / "app.db")
+    knowledge_base = KnowledgeBase(store)
+    public_capture = store.save_capture(
+        image_path="",
+        source_text="Emergency management",
+        translation="",
+        explanation="",
+        domain="公共安全",
+    )
+    other_capture = store.save_capture(
+        image_path="",
+        source_text="Dependency injection",
+        translation="",
+        explanation="",
+        domain="编程",
+    )
+    knowledge_base.ingest(
+        KnowledgeIngest(
+            capture_id=public_capture,
+            terms=[{"term": "Emergency", "domain": "公共安全"}],
+            domain="公共安全",
+        )
+    )
+    knowledge_base.ingest(
+        KnowledgeIngest(
+            capture_id=other_capture,
+            terms=[{"term": "DependencyInjection", "domain": "编程"}],
+            domain="编程",
+        )
+    )
+
+    monkeypatch.setattr(main_window_module, "HistoryStore", lambda: store)
+    monkeypatch.setattr(main_window_module, "ensure_app_dirs", lambda: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_build_tray", lambda self: None)
+    monkeypatch.setattr(main_window_module.MainWindow, "_start_hotkey", lambda self: None)
+
+    window = main_window_module.MainWindow()
+    assert window.terms_table.horizontalHeaderItem(1).text() == "领域"
+    assert window.terms_domain_combo.findData("公共安全") >= 0
+    assert window.terms_domain_combo.findData("编程") >= 0
+    assert window.terms_table.rowCount() == 2
+
+    window.terms_domain_combo.setCurrentIndex(
+        window.terms_domain_combo.findData("公共安全")
+    )
+    app.processEvents()
+    assert window.terms_table.rowCount() == 1
+    assert window.terms_table.item(0, 0).text() == "Emergency"
+    assert window.terms_table.item(0, 1).text() == "公共安全"
+    assert window.terms_table.horizontalHeaderItem(1).text() == "领域"
 
     window.close()
     app.processEvents()

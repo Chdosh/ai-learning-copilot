@@ -1249,7 +1249,6 @@ class HistoryStore:
         fold_basic: bool,
         scope_current_direction: bool,
         context_param: int,
-        effective_domain: str,
     ) -> tuple[str, list]:
         where: list[str] = []
         params: list = []
@@ -1266,14 +1265,10 @@ class HistoryStore:
             )
         if scope_current_direction:
             if context_param > 0:
-                where.append(
-                    "(COALESCE(s.exact_count, 0) > 0 "
-                    "OR (COALESCE(s.other_count, 0) = 0 AND t.domain = ?))"
-                )
-                params.append(effective_domain)
+                where.append("COALESCE(s.exact_count, 0) > 0")
             else:
-                where.append("t.domain = ?")
-                params.append(effective_domain)
+                # 临时预设没有稳定方向 ID，不能用领域值冒充方向归属。
+                where.append("1 = 0")
         where_sql = f"WHERE {' AND '.join(where)}" if where else ""
         return where_sql, params
 
@@ -1294,7 +1289,6 @@ class HistoryStore:
             fold_basic=fold_basic,
             scope_current_direction=scope_current_direction,
             context_param=context_param,
-            effective_domain=effective_domain,
         )
         with self._connect() as conn:
             rows = conn.execute(

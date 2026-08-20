@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from app.services.history_store import (
@@ -44,10 +45,12 @@ class KnowledgeIngestResult:
 @dataclass(slots=True)
 class TermQuery:
     view: str = "focus"  # focus | current_direction | all
+    sort: str = "latest"  # latest | oldest | ranked
     query: str = ""
     domain: str = ""
     current_context_id: int | None = None
     effective_domain: str = "通用"
+    since_at: str = ""
     limit: int = 50
     offset: int = 0
 
@@ -254,8 +257,9 @@ class KnowledgeBase:
 
         视图规则（方案 §6.4-§6.6）：
         - ``focus`` / ``current_direction`` 折叠无显式信号的基础词，搜索时绕过；
-        - ``current_direction`` 范围：exact 来源，或全 NULL 来源 / 无来源术语按领域回退；
-        - 排序为可解释分层：显式意图 > 方向相关性 > 来源/查看证据（封顶）> term.id。
+        - ``current_direction`` 只认 capture 绑定的 exact 方向，不按领域回退；
+        - 默认按最新真实学习来源时间排序；无来源术语回退到首次入库时间；
+        - ranked 保留可解释分层：显式意图 > 方向相关性 > 来源/查看证据。
         """
         self._validate_term_query(query)
         search = query.query.strip()
@@ -269,8 +273,17 @@ class KnowledgeBase:
             current_context_id=query.current_context_id,
             effective_domain=query.effective_domain,
         )
+        if query.since_at:
+            aggregates = [
+                aggregate
+                for aggregate in aggregates
+                if self._aggregate_activity_at(aggregate) >= query.since_at
+            ]
         total = len(aggregates)
-        self._sort_aggregates(aggregates, query.effective_domain)
+        if query.sort == "ranked":
+            self._sort_aggregates(aggregates, query.effective_domain)
+        else:
+            self._sort_aggregates_by_time(aggregates, oldest=query.sort == "oldest")
         page = aggregates[query.offset : query.offset + query.limit]
         items = [
             TermViewItem(
@@ -553,6 +566,24 @@ class KnowledgeBase:
         )
 
     @staticmethod
+    def _aggregate_activity_at(aggregate: TermAggregate) -> str:
+        """术语最后积累时间；无真实来源时回退到首次入库时间。"""
+        return aggregate.latest_source_at or aggregate.term.first_seen_at
+
+    @staticmethod
+    def _sort_aggregates_by_time(
+        aggregates: list[TermAggregate],
+        *,
+        oldest: bool,
+    ) -> None:
+        """按真实学习来源时间排序；手动/无来源术语回退到首次入库时间。"""
+        aggregates.sort(key=lambda aggregate: aggregate.term.id)
+        aggregates.sort(
+            key=KnowledgeBase._aggregate_activity_at,
+            reverse=not oldest,
+        )
+
+    @staticmethod
     def _build_reasons(aggregate: TermAggregate, effective_domain: str) -> tuple[str, ...]:
         """最多 3 条最有解释力的理由（方案 §6.7），按意图 > 方向 > 证据排序。"""
         term = aggregate.term
@@ -581,6 +612,13 @@ class KnowledgeBase:
     def _validate_term_query(query: TermQuery) -> None:
         if query.view not in ("focus", "current_direction", "all"):
             raise ValueError(f"未知术语视图: {query.view!r}")
+        if query.sort not in ("latest", "oldest", "ranked"):
+            raise ValueError(f"未知术语排序: {query.sort!r}")
+        if query.since_at:
+            try:
+                datetime.fromisoformat(query.since_at)
+            except ValueError as exc:
+                raise ValueError(f"无效的时间筛选起点: {query.since_at!r}") from exc
         if query.limit <= 0:
             raise ValueError("limit 必须大于 0")
         if query.offset < 0:

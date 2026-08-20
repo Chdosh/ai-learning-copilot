@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QThread, Signal
@@ -40,7 +40,6 @@ from PySide6.QtWidgets import (
 from app import VERSION_LABEL
 from app.paths import DATA_DIR, DB_PATH, PROJECT_DIR, SCREENSHOTS_DIR, ensure_app_dirs
 from app.services.categorizer import get_all_categories
-from app.services.context_detector import DOMAIN_KEYWORDS
 from app.services.history_store import CaptureRecord, HistoryStore, TermRecord
 from app.services.knowledge_base import (
     KnowledgeBase,
@@ -62,6 +61,7 @@ from app.ui.theme import (
     BORDER,
     BORDER_LIGHT,
     CARD,
+    ChevronComboBox,
     DANGER,
     DISABLED,
     FONT_BODY,
@@ -82,7 +82,6 @@ from app.ui.theme import (
     apply_primary_button_style,
     button_qss,
     card_qss,
-    chip_qss,
     ensure_label_backgrounds_transparent,
     nav_qss,
 )
@@ -90,6 +89,11 @@ from app.ui.workbench import WorkbenchPage
 from app.ui.workers import CaptureStreamWorker, FollowupWorker
 
 TERMS_PAGE_SIZE = 20
+
+
+def _compact_text(text: str, limit: int) -> str:
+    normalized = " ".join((text or "").split())
+    return normalized if len(normalized) <= limit else f"{normalized[: limit - 1].rstrip()}…"
 
 
 def centered_icon(icon: QIcon, size: int = 256) -> QIcon:
@@ -153,11 +157,10 @@ class MainWindow(QMainWindow):
         self.followup_worker: FollowupWorker | None = None
         self._history_records: list[CaptureRecord] = []
         self._terms_records: list[TermViewItem] = []
-        self._terms_view = "focus"  # focus | current_direction | all
-        self._terms_domain_counts: list[tuple[str, int]] = []
-        self._terms_direction_label = "通用"
-        self._terms_page = 0
+        self._terms_time_range = ""
         self._terms_domain = ""
+        self._terms_domain_counts: list[tuple[str, int]] = []
+        self._terms_page = 0
         self._terms_query = ""
         self._terms_total = 0
         self._terms_pages = 1
@@ -355,18 +358,15 @@ class MainWindow(QMainWindow):
             self._terms_page = 0
         self._terms_query = query
 
-        current_context_id, effective_domain, direction_label = self._current_terms_direction()
-        self._terms_direction_label = direction_label
-        # current_direction 视图由方向范围接管，手动领域筛选失效（方案 §6.5）
-        domain = "" if self._terms_view == "current_direction" else self._terms_domain
+        current_context_id, effective_domain, _ = self._current_terms_direction()
 
-        page = self._query_term_page(query, domain, current_context_id, effective_domain)
+        page = self._query_term_page(query, current_context_id, effective_domain)
         self._terms_total = page.total
         self._terms_pages = max(1, (page.total + TERMS_PAGE_SIZE - 1) // TERMS_PAGE_SIZE)
         # 过滤结果变少导致当前页越界时，回退到最后一页（只多一次查询）
         if page.total and not page.items and self._terms_page >= self._terms_pages:
             self._terms_page = self._terms_pages - 1
-            page = self._query_term_page(query, domain, current_context_id, effective_domain)
+            page = self._query_term_page(query, current_context_id, effective_domain)
         self._terms_records = page.items
         self._terms_domain_counts = page.domain_counts
 
@@ -414,20 +414,11 @@ class MainWindow(QMainWindow):
             table.setUpdatesEnabled(True)
 
         self._show_selected_term()
-        header_item = self.terms_table.horizontalHeaderItem(1)
-        if header_item is not None:
-            if self._terms_view == "current_direction":
-                header_item.setText(f"{direction_label} ▾")
-            else:
-                header_item.setText(f"{self._terms_domain or '领域'} ▾")
         self.terms_page_label.setText(f"第 {self._terms_page + 1}/{self._terms_pages} 页")
         self.terms_prev_button.setEnabled(self._terms_page > 0)
         self.terms_next_button.setEnabled(self._terms_page < self._terms_pages - 1)
         self._update_terms_hscroll_buttons()
-        self._sync_terms_view_controls()
-        if hasattr(self, "terms_review_button"):
-            due = self.knowledge_base.count_due_terms()
-            self.terms_review_button.setText(f"今日复习 ({due})" if due else "今日复习")
+        self._sync_terms_domain_control()
         if hasattr(self, "sidebar_stats_value"):
             fav_count = self.history_store.count_favorite_terms()
             self.sidebar_stats_value.setText(
@@ -437,17 +428,18 @@ class MainWindow(QMainWindow):
     def _query_term_page(
         self,
         query: str,
-        domain: str,
         current_context_id: int | None,
         effective_domain: str,
     ):
         return self.knowledge_base.query_terms(
             TermQuery(
-                view=self._terms_view,
+                view="all",
+                sort="latest",
                 query=query,
-                domain=domain,
+                domain=self._terms_domain,
                 current_context_id=current_context_id,
                 effective_domain=effective_domain,
+                since_at=self._terms_since_at(),
                 limit=TERMS_PAGE_SIZE,
                 offset=self._terms_page * TERMS_PAGE_SIZE,
             )
@@ -470,79 +462,51 @@ class MainWindow(QMainWindow):
         display = f"{domain} · {scene}" if scene != "通用" else domain
         return None, domain or "通用", display
 
-    def _set_terms_view(self, view: str) -> None:
-        if view == self._terms_view:
+    def _set_terms_time_range(self, index: int) -> None:
+        time_range = str(self.terms_time_combo.itemData(index) or "")
+        if time_range == self._terms_time_range:
             return
-        self._terms_view = view
+        self._terms_time_range = time_range
         self._terms_page = 0
         self.refresh_terms()
 
-    def _sync_terms_view_controls(self) -> None:
-        for key, button in getattr(self, "_terms_view_buttons", {}).items():
-            button.setChecked(key == self._terms_view)
-        if hasattr(self, "terms_view_label"):
-            if self._terms_view == "current_direction":
-                self.terms_view_label.setText(f"当前方向：{self._terms_direction_label}")
-            else:
-                self.terms_view_label.setText("")
-
-    def _terms_goto_page(self, page: int) -> None:
-        self._terms_page = max(0, min(page, self._terms_pages - 1))
-        self.refresh_terms()
-
-    def _on_terms_header_clicked(self, section: int) -> None:
-        if section != 1:
-            return
-        # 当前方向视图由方向范围接管，手动领域筛选失效（方案 §6.5）
-        if self._terms_view == "current_direction":
-            return
-        counts = dict(self._terms_domain_counts)
-        ordered: list[str] = []
-        for direction in ["通用"] + list(DOMAIN_KEYWORDS.keys()):
-            if direction in counts:
-                ordered.append(direction)
-        ordered += [d for d in counts if d not in ordered]
-
-        menu = QMenu(self.terms_table)
-        menu.setObjectName("termsDomainMenu")
-        menu.setStyleSheet(
-            f"""
-            QMenu#termsDomainMenu {{
-                color: {TEXT_SECONDARY};
-                background: {CARD};
-                border: 1px solid {BORDER};
-                border-radius: {RADIUS_MD};
-                padding: 5px;
-            }}
-            QMenu#termsDomainMenu::item {{
-                padding: 6px 18px 6px 10px;
-                border-radius: 6px;
-            }}
-            QMenu#termsDomainMenu::item:selected {{ background: {PRIMARY_SOFT}; color: {PRIMARY}; }}
-            """
-        )
-
-        def add_item(label: str, domain: str) -> None:
-            action = menu.addAction(label)
-            action.setCheckable(True)
-            action.setChecked(domain == self._terms_domain)
-            action.triggered.connect(
-                lambda checked=False, d=domain: self._set_terms_domain(d)
-            )
-
-        add_item("全部", "")
-        for direction in ordered:
-            add_item(f"{direction} ({counts[direction]})", direction)
-
-        header = self.terms_table.horizontalHeader()
-        x = header.sectionViewportPosition(1)
-        menu.exec(self.terms_table.viewport().mapToGlobal(QPoint(x, 0)))
-
-    def _set_terms_domain(self, domain: str) -> None:
+    def _set_terms_domain(self, index: int) -> None:
+        domain = str(self.terms_domain_combo.itemData(index) or "")
         if domain == self._terms_domain:
             return
         self._terms_domain = domain
         self._terms_page = 0
+        self.refresh_terms()
+
+    def _terms_since_at(self) -> str:
+        now = datetime.now()
+        if self._terms_time_range == "today":
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif self._terms_time_range == "7d":
+            start = now - timedelta(days=7)
+        elif self._terms_time_range == "30d":
+            start = now - timedelta(days=30)
+        else:
+            return ""
+        return start.isoformat(timespec="seconds")
+
+    def _sync_terms_domain_control(self) -> None:
+        if not hasattr(self, "terms_domain_combo"):
+            return
+        previous = self.terms_domain_combo.blockSignals(True)
+        self.terms_domain_combo.clear()
+        self.terms_domain_combo.addItem("全部领域", "")
+        for domain, count in self._terms_domain_counts:
+            self.terms_domain_combo.addItem(f"{domain} ({count})", domain)
+        target = self.terms_domain_combo.findData(self._terms_domain)
+        if target < 0:
+            self._terms_domain = ""
+            target = 0
+        self.terms_domain_combo.setCurrentIndex(target)
+        self.terms_domain_combo.blockSignals(previous)
+
+    def _terms_goto_page(self, page: int) -> None:
+        self._terms_page = max(0, min(page, self._terms_pages - 1))
         self.refresh_terms()
 
     def _terms_scroll_h(self, direction: int) -> None:
@@ -761,8 +725,22 @@ class MainWindow(QMainWindow):
         )
 
     def _sync_terms_search_height(self) -> None:
-        if hasattr(self, "terms_search") and hasattr(self, "terms_add_button"):
-            self.terms_search.setFixedHeight(self.terms_add_button.sizeHint().height())
+        if not hasattr(self, "terms_search"):
+            return
+        controls = [
+            control
+            for control in (
+                getattr(self, "terms_time_combo", None),
+                getattr(self, "terms_domain_combo", None),
+            )
+            if control is not None
+        ]
+        if not controls:
+            return
+        height = max(control.sizeHint().height() for control in controls)
+        self.terms_search.setFixedHeight(height)
+        self.terms_time_combo.setFixedHeight(height)
+        self.terms_domain_combo.setFixedHeight(height)
 
     def adjust_text_size(self, delta: int) -> None:
         self.ui_font_size = max(10, min(17, self.ui_font_size + delta))
@@ -825,48 +803,45 @@ class MainWindow(QMainWindow):
         table_header_row.setSpacing(8)
         table_header_row.addWidget(_field_title("术语列表"))
         table_header_row.addStretch(1)
+        table_layout.addLayout(table_header_row)
+
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
         self.terms_search = QLineEdit()
         self.terms_search.setPlaceholderText("搜索术语")
-        self.terms_search.setFixedWidth(150)
+        self.terms_search.setMinimumWidth(84)
+        self.terms_search.setMaximumWidth(150)
+        self.terms_search.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
         self.terms_search.setStyleSheet(
             f"padding: 0 10px; border: 1px solid {BORDER}; "
             f"border-radius: {RADIUS_MD}; background: {CARD};"
         )
         self.terms_search.returnPressed.connect(self.refresh_terms)
-        table_header_row.addWidget(self.terms_search)
-        self.terms_add_button = _primary_button("新增术语  +")
-        self.terms_add_button.clicked.connect(self._add_manual_term)
-        table_header_row.addWidget(self.terms_add_button)
-        self.terms_review_button = QPushButton("今日复习")
-        self.terms_review_button.setStyleSheet(button_qss())
-        self.terms_review_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.terms_review_button.setToolTip("复习今天到期的收藏术语（间隔重复）")
-        self.terms_review_button.clicked.connect(self._open_review)
-        table_header_row.addWidget(self.terms_review_button)
+        filter_row.addWidget(self.terms_search, 1)
+        self.terms_time_combo = ChevronComboBox()
+        self.terms_time_combo.addItem("全部时间", "")
+        self.terms_time_combo.addItem("今天", "today")
+        self.terms_time_combo.addItem("近 7 天", "7d")
+        self.terms_time_combo.addItem("近 30 天", "30d")
+        self.terms_time_combo.setFixedWidth(92)
+        self.terms_time_combo.setToolTip("按最后一次真实学习时间筛选，列表始终按最新积累排序")
+        self.terms_time_combo.currentIndexChanged.connect(self._set_terms_time_range)
+        filter_row.addWidget(self.terms_time_combo)
+        self.terms_domain_combo = ChevronComboBox()
+        self.terms_domain_combo.addItem("全部领域", "")
+        self.terms_domain_combo.setMinimumWidth(104)
+        self.terms_domain_combo.setMaximumWidth(160)
+        self.terms_domain_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self.terms_domain_combo.setToolTip("按术语自身的领域分类筛选")
+        self.terms_domain_combo.currentIndexChanged.connect(self._set_terms_domain)
+        filter_row.addWidget(self.terms_domain_combo, 1)
         self._sync_terms_search_height()
-        table_layout.addLayout(table_header_row)
+        table_layout.addLayout(filter_row)
 
-        # P1-C：视图切换（设计系统：胶囊 = 可切换），不改变表格视觉结构
-        view_row = QHBoxLayout()
-        view_row.setSpacing(6)
-        self._terms_view_buttons: dict[str, QPushButton] = {}
-        for key, label in (
-            ("focus", "重点"),
-            ("current_direction", "当前方向"),
-            ("all", "全部"),
-        ):
-            button = QPushButton(label)
-            button.setCheckable(True)
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-            button.setStyleSheet(chip_qss())
-            button.clicked.connect(lambda checked=False, v=key: self._set_terms_view(v))
-            view_row.addWidget(button)
-            self._terms_view_buttons[key] = button
-        view_row.addStretch(1)
-        self.terms_view_label = QLabel("")
-        self.terms_view_label.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
-        view_row.addWidget(self.terms_view_label)
-        table_layout.addLayout(view_row)
         self.terms_table = QTableWidget(0, 6)
         self.terms_table.setObjectName("termsTable")
         self.terms_table.setFrameShape(QFrame.Shape.NoFrame)
@@ -902,7 +877,7 @@ class MainWindow(QMainWindow):
             }}
             """
         )
-        self.terms_table.setHorizontalHeaderLabels(["术语", "领域 ▾", "中文名", "关键词", "次数", "收藏"])
+        self.terms_table.setHorizontalHeaderLabels(["术语", "领域", "中文名", "关键词", "次数", "收藏"])
         self.terms_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.terms_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.terms_table.verticalHeader().setVisible(False)
@@ -926,8 +901,6 @@ class MainWindow(QMainWindow):
         table_header.resizeSection(2, 120)
         table_header.resizeSection(4, 48)
         table_header.resizeSection(5, 48)
-        table_header.sectionClicked.connect(self._on_terms_header_clicked)
-
         self.terms_table_card = table_card
         self.terms_scrollbar = self.terms_table.verticalScrollBar()
         self.terms_table_viewport = self.terms_table.viewport()
@@ -1097,9 +1070,10 @@ class MainWindow(QMainWindow):
         detail_layout.addLayout(term_buttons)
 
         content.addWidget(table_card, 7)
-        table_card.setMinimumWidth(360)
+        table_card.setMinimumWidth(330)
         content.addWidget(detail_panel, 4)
-        detail_panel.setMinimumWidth(220)
+        detail_panel.setMinimumWidth(180)
+        self.terms_detail_panel = detail_panel
         layout.addLayout(content, 1)
         return page
 
@@ -1591,7 +1565,6 @@ class MainWindow(QMainWindow):
         desc_lbl.setWordWrap(True)
         desc_lbl.setStyleSheet(f"color:{MUTED}; line-height:1.5; padding: 8px 0;")
         about_layout.addWidget(desc_lbl)
-
         tech_card = _card()
         tech_layout = QVBoxLayout(tech_card)
         tech_layout.setContentsMargins(16, 16, 16, 16)
@@ -1809,7 +1782,7 @@ class MainWindow(QMainWindow):
             title = (capture.source_text or capture.translation or "截图").strip().splitlines()
             title = title[0] if title else "截图"
             created = (capture.created_at or "").replace("T", " ")[:16]
-            item = QListWidgetItem(f"{_compact(title, 24)} · {created}")
+            item = QListWidgetItem(f"{_compact_text(title, 24)} · {created}")
             item.setData(Qt.ItemDataRole.UserRole, capture.id)
             self.term_sources_list.addItem(item)
 
