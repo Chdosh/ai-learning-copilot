@@ -32,7 +32,7 @@
 
 ## 已知限制
 
-- 仅发布 Windows 10 / 11 x64 Portable 版本；没有安装器、自动更新、代码签名，也没有 macOS / Linux 构建。
+- 仅发布 Windows 10 / 11 x64 Portable 版本；已支持 Portable 内置自动更新，但仍没有安装器和代码签名，也没有 macOS / Linux 构建。
 - 间隔重复已上线（收藏术语按遗忘曲线排期复习）；学习建议已沉淀为清单，但尚未做建议采纳率统计与学习路径视图。
 - embedding 表结构已预留，但语义搜索和知识关联界面尚未接入。
 - OCR 使用 RapidOCR 中英文模型，暂无可视化语言包管理和系统 OCR 切换。
@@ -56,7 +56,7 @@
   - 新建 KnowledgeBase 统一外部 interface，UI/worker 不再直接写知识表
   - Gate 已在 `6be9561` 完成；后续以 docs/personal_knowledge_base_plan.md 为唯一方案
 - [暂停] 首次启动引导、配置诊断、更清晰的错误提示
-- [暂停] 发布包自动构建、SHA-256 校验、升级迁移检查、可选自动更新
+- [部分完成] 发布包自动构建与升级迁移检查仍待补齐；Portable 更新检查、SHA-256 校验与独立更新器已实现
 
 ### 个人知识库演进
 

@@ -49,3 +49,41 @@ exe = EXE(
     icon="assets/icon.ico",
     version="assets/version_info.txt",
 )
+
+updater_analysis = Analysis(
+    ["app/updater_main.py"],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=[],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+
+updater_pyz = PYZ(updater_analysis.pure)
+
+updater_exe = EXE(
+    updater_pyz,
+    updater_analysis.scripts,
+    updater_analysis.binaries,
+    updater_analysis.datas,
+    [],
+    name="AI-Learning-Copilot-Updater",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+
+    entitlements_file=None,
+    icon="assets/icon.ico",
+    version="assets/version_info.txt",
+)

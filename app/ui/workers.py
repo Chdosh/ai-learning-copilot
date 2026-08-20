@@ -20,6 +20,7 @@ from app.services.history_store import HistoryStore
 from app.services.knowledge_base import KnowledgeBase, KnowledgeIngest
 from app.services.ocr import OCRError, OCRService
 from app.services.settings import AppSettings
+from app.services.update import ReleaseUpdateClient, UpdateInfo
 
 
 def _term_dicts(result: AIResult) -> list[dict]:
@@ -513,3 +514,51 @@ class SummaryWorker(QThread):
         self.completed.emit({"summary": summary})
 
 
+
+
+class UpdateCheckWorker(QThread):
+    """Check the stable GitHub release without blocking the Qt event loop."""
+
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, current_version: str) -> None:
+        super().__init__()
+        self.current_version = current_version
+
+    def run(self) -> None:
+        try:
+            result = ReleaseUpdateClient(
+                current_version=self.current_version
+            ).check_for_update()
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.completed.emit(result)
+
+
+class UpdateDownloadWorker(QThread):
+    """Download and verify one release package away from the UI thread."""
+
+    progress = Signal(int)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, info: UpdateInfo, current_version: str) -> None:
+        super().__init__()
+        self.info = info
+        self.current_version = current_version
+
+    def run(self) -> None:
+        try:
+            result = ReleaseUpdateClient(
+                current_version=self.current_version
+            ).download(self.info, progress=self._on_progress)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.completed.emit(result)
+
+    def _on_progress(self, downloaded: int, total: int) -> None:
+        if total > 0:
+            self.progress.emit(max(0, min(100, int(downloaded * 100 / total))))
