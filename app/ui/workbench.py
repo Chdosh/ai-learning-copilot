@@ -1,7 +1,14 @@
-"""工作台：学习方向。
+"""工作台：学习方向（精简版）。
 
-学习方向：当前生效方向状态卡直接提供切换、新建、编辑、删除；编辑表单只修改
-明确选择的记录；草稿与当前生效方向彼此独立，保存绝不隐式覆盖其他记录。
+单一职责：选择 / 创建 / 编辑学习方向。知识资产（今日复习、学习建议）
+已迁移至学习页。
+
+设计要点：
+- 领域 / 场景可直接输入（输入即自定义，不再有隐藏的"自定义…"组合）；
+- 应用为当前方向 = 临时生效（不落库）；保存为新方向 = 落库并可复用；
+- 已保存方向列表：点击切换，行内使用 / 编辑 / 删除；
+- 摘要分析结果先预览（含命中依据），确认后才填入表单——自动补充必须人工验证；
+- 数据错位整理仅在检测到异常时出现提示。
 """
 from __future__ import annotations
 
@@ -9,7 +16,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,6 +26,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -34,21 +43,20 @@ from app.services.context_detector import (
     detect,
     extract_keywords,
 )
-from app.services.history_store import ContextRecord, HistoryStore, LearningTip
+from app.services.history_store import ContextRecord, HistoryStore
 from app.services.settings import SettingsService
 from app.ui.theme import (
     ArrowSendButton,
     BORDER,
     BORDER_LIGHT,
     CARD,
-    ChevronComboBox,
     DANGER,
     DISABLED,
     FONT_MICRO,
-    FONT_TITLE,
     MUTED,
     PRIMARY,
     PRIMARY_DARK,
+    PRIMARY_SOFT,
     RADIUS_LG,
     RADIUS_MD,
     TEXT,
@@ -56,11 +64,9 @@ from app.ui.theme import (
     apply_primary_button_style,
     button_qss,
 )
-from app.ui.workers import DigestWorker
 
 PRESET_DOMAINS = ["通用"] + list(DOMAIN_KEYWORDS.keys())
 PRESET_SCENES = ["通用", "其他"] + sorted(SCENE_KEYWORDS.keys())
-CUSTOM_ITEM = "自定义…"
 
 
 def _direction_name(domain: str, scene: str) -> str:
@@ -130,46 +136,73 @@ class DirectionRepairDialog(QDialog):
         ]
 
 
-class SummaryPreviewDialog(QDialog):
-    """沉淀预览：原要点与合并后要点并排，用户确认后才写入。"""
+class DirectionAnalysisPreviewDialog(QDialog):
+    """摘要分析预览：显示识别依据，用户确认后才填入表单。"""
 
-    def __init__(self, old_summary: str, new_summary: str, parent=None) -> None:
+    def __init__(
+        self,
+        domain: str,
+        scene: str,
+        keywords: list[str],
+        summary_preview: str,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("确认沉淀")
-        self.setMinimumSize(560, 420)
+        self.setWindowTitle("分析结果预览")
+        self.setMinimumWidth(520)
+        self._apply_requested = False
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
-        tip = QLabel("将把以下合并后的背景要点写入当前学习方向（原内容会被替换）：")
-        tip.setWordWrap(True)
-        tip.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        layout.addWidget(tip)
+        layout.addWidget(_card_title("识别到以下学习方向，确认后填入表单："))
 
-        old_title = QLabel("当前背景要点")
-        old_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(old_title)
-        old_box = QTextEdit()
-        old_box.setReadOnly(True)
-        old_box.setPlainText(old_summary or "（空）")
-        old_box.setMaximumHeight(84)
-        layout.addWidget(old_box)
+        info = QLabel(
+            f"领域：{domain}\n场景：{scene}\n"
+            f"命中关键词：{'、'.join(keywords) if keywords else '（无）'}"
+        )
+        info.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
+        layout.addWidget(info)
 
-        new_title = QLabel("合并后的背景要点")
-        new_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(new_title)
-        new_box = QTextEdit()
-        new_box.setReadOnly(True)
-        new_box.setPlainText(new_summary)
-        layout.addWidget(new_box, 1)
+        summary_title = QLabel("建议背景要点")
+        summary_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        layout.addWidget(summary_title)
+        summary_box = QTextEdit()
+        summary_box.setReadOnly(True)
+        summary_box.setPlainText(summary_preview)
+        summary_box.setMinimumHeight(120)
+        layout.addWidget(summary_box)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("应用")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("填入表单")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
+        buttons.accepted.connect(self._accept_apply)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _accept_apply(self) -> None:
+        self._apply_requested = True
+        self.accept()
+
+    def apply_requested(self) -> bool:
+        return self._apply_requested
+
+
+_ROW_BUTTON_QSS = f"""
+QPushButton {{
+    background: transparent;
+    border: 1px solid {BORDER};
+    border-radius: {RADIUS_MD};
+    min-width: 36px;
+    min-height: 22px;
+    padding: 2px 8px;
+    color: {TEXT_SECONDARY};
+    font-size: 13px;
+}}
+QPushButton:hover {{ border-color: {PRIMARY}; color: {PRIMARY}; }}
+QPushButton:pressed {{ background: {PRIMARY_SOFT}; }}
+"""
 
 
 class WorkbenchPage(QWidget):
@@ -185,12 +218,8 @@ class WorkbenchPage(QWidget):
         self.history_store = history_store
         self.settings_service = settings_service
         self._editing_context_id: int | None = None
-        self._form_open = True
-        self._refreshing_direction_selector = False
-        self._digest_worker = None
         self._build_ui()
-        self.refresh_directions()
-        self.refresh_tips()
+        self.refresh_directions(force=True)
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -199,211 +228,98 @@ class WorkbenchPage(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        centered = QWidget()
+        centered_layout = QHBoxLayout(centered)
+        centered_layout.setContentsMargins(20, 16, 20, 16)
+        centered_layout.addStretch(1)
         content = QWidget()
-        columns = QHBoxLayout(content)
-        columns.setContentsMargins(20, 16, 20, 16)
-        columns.setSpacing(14)
+        content.setMaximumWidth(640)
+        centered_layout.addWidget(content)
+        centered_layout.addStretch(1)
+        columns = QVBoxLayout(content)
+        columns.setContentsMargins(0, 0, 0, 0)
+        columns.setSpacing(12)
 
-        main_panel = QWidget()
-        main_layout = QVBoxLayout(main_panel)
-        main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(12)
-        self.direction_edit_card = self._build_direction_edit_card()
-        main_layout.addWidget(self.direction_edit_card)
-        self.tips_card = self._build_tips_card()
-        main_layout.addWidget(self.tips_card)
-        self.digest_card = self._build_digest_card()
-        main_layout.addWidget(self.digest_card)
-        main_layout.addStretch(1)
-
-        side_panel = QWidget()
-        side_panel.setFixedWidth(320)
-        side_layout = QVBoxLayout(side_panel)
-        side_layout.setContentsMargins(0, 0, 0, 0)
-        side_layout.setSpacing(12)
-        self.direction_status_card = self._build_direction_status_card()
-        side_layout.addWidget(self.direction_status_card)
-        side_layout.addStretch(1)
-        columns.addWidget(side_panel)
-        columns.addWidget(main_panel, 1)
-        scroll.setWidget(content)
-        outer.addWidget(scroll)
-
-    def _build_card(self) -> QFrame:
-        card = QFrame()
-        card.setObjectName("workbenchCard")
-        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        card.setStyleSheet(
-            f"QFrame#workbenchCard {{ background: {CARD}; border: 1px solid {BORDER}; "
-            f"border-radius: {RADIUS_LG}; }}"
-        )
-        return card
-
-    # ---- 当前生效方向：紧凑状态卡 ----
-
-    def _build_direction_status_card(self) -> QFrame:
         card = self._build_card()
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 16)
+        card_layout.setSpacing(10)
 
-        self.direction_status_title = QLabel("当前学习方向")
-        self.direction_status_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(self.direction_status_title)
-
-        self.direction_status_label = QLabel("通用")
-        self.direction_status_label.setStyleSheet(
-            f"font-size: {FONT_TITLE}; color: {TEXT}; font-weight: 600;"
-        )
-        layout.addWidget(self.direction_status_label)
-
-        self.direction_status_hint = QLabel("用于下一次截图识别")
-        self.direction_status_hint.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(self.direction_status_hint)
-
-        quick_separator = QFrame()
-        quick_separator.setFrameShape(QFrame.Shape.HLine)
-        quick_separator.setStyleSheet(f"color: {BORDER};")
-        layout.addWidget(quick_separator)
-
-        quick_title = QLabel("快速选择")
-        quick_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-weight: 600;")
-        layout.addWidget(quick_title)
-
-        domain_label = QLabel("领域")
-        domain_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(domain_label)
-        self.quick_domain_combo = ChevronComboBox()
-        self.quick_domain_combo.addItems(PRESET_DOMAINS)
-        self.quick_domain_combo.setMinimumHeight(32)
-        layout.addWidget(self.quick_domain_combo)
-
-        scene_label = QLabel("场景")
-        scene_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(scene_label)
-        self.quick_scene_combo = ChevronComboBox()
-        self.quick_scene_combo.addItems(PRESET_SCENES[:-1])
-        self.quick_scene_combo.setMinimumHeight(32)
-        layout.addWidget(self.quick_scene_combo)
-
-        quick_actions = QHBoxLayout()
-        quick_actions.setSpacing(8)
-        self.apply_quick_button = QPushButton("立即应用")
-        apply_primary_button_style(self.apply_quick_button)
-        self.apply_quick_button.clicked.connect(self._apply_quick_direction)
-        quick_actions.addWidget(self.apply_quick_button, 1)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        header_row.addWidget(_card_title("学习方向"))
+        header_row.addStretch(1)
+        self.direction_status_label = QLabel("当前生效：通用（临时）")
+        self.direction_status_label.setStyleSheet(f"color: {MUTED}; font-size: 13px;")
+        header_row.addWidget(self.direction_status_label)
         self.reset_direction_button = QPushButton("恢复通用")
         self.reset_direction_button.setStyleSheet(button_qss())
+        self.reset_direction_button.setToolTip("清空当前方向，回到通用解释")
         self.reset_direction_button.clicked.connect(self._reset_direction)
-        quick_actions.addWidget(self.reset_direction_button)
-        layout.addLayout(quick_actions)
+        header_row.addWidget(self.reset_direction_button)
+        card_layout.addLayout(header_row)
 
-        custom_separator = QFrame()
-        custom_separator.setFrameShape(QFrame.Shape.HLine)
-        custom_separator.setStyleSheet(f"color: {BORDER};")
-        layout.addWidget(custom_separator)
-
-        custom_title = QLabel("自定义方向")
-        custom_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-weight: 600;")
-        layout.addWidget(custom_title)
-        self.direction_selector = ChevronComboBox()
-        self.direction_selector.setMinimumHeight(32)
-        self.direction_selector.currentIndexChanged.connect(self._on_direction_selected)
-        layout.addWidget(self.direction_selector)
-
-        action_row = QHBoxLayout()
-        action_row.setSpacing(6)
-        self.new_direction_button = QPushButton("新建")
-        self.edit_direction_button = QPushButton("编辑")
-        self.delete_direction_button = QPushButton("删除")
-        for button in (
-            self.new_direction_button,
-            self.edit_direction_button,
-            self.delete_direction_button,
-        ):
-            button.setStyleSheet(button_qss())
-            action_row.addWidget(button, 1)
-        self.new_direction_button.clicked.connect(self._new_direction)
-        self.edit_direction_button.clicked.connect(self._edit_current_direction)
-        self.delete_direction_button.clicked.connect(self._delete_current_direction)
-        layout.addLayout(action_row)
-
-        repair_row = QHBoxLayout()
-        repair_row.setSpacing(8)
-        self.repair_notice_label = QLabel("")
-        self.repair_notice_label.setStyleSheet(f"color: {DANGER}; font-size: {FONT_MICRO};")
-        self.repair_notice_label.setWordWrap(True)
-        self.repair_button = QPushButton("整理")
-        self.repair_button.setStyleSheet(button_qss())
-        self.repair_button.clicked.connect(self._repair_directions)
-        self.repair_button.setVisible(False)
-        repair_row.addWidget(self.repair_notice_label, 1)
-        repair_row.addWidget(self.repair_button)
-        layout.addLayout(repair_row)
-        return card
-
-    # ---- 自定义方向：常驻编辑区 ----
-
-    def _build_direction_edit_card(self) -> QFrame:
-        card = self._build_card()
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 16)
-        layout.setSpacing(8)
-
-        self.editing_target_label = _card_title("新建学习方向")
-        layout.addWidget(self.editing_target_label)
-
-        self.edit_form = QWidget()
-        self.edit_form.setStyleSheet(f"background: {CARD};")
-        form = QVBoxLayout(self.edit_form)
-        form.setContentsMargins(0, 4, 0, 0)
-        form.setSpacing(8)
-
-        metadata_row = QHBoxLayout()
-        metadata_row.setSpacing(10)
-
-        name_column = QWidget()
-        name_layout = QVBoxLayout(name_column)
-        name_layout.setContentsMargins(0, 0, 0, 0)
-        name_layout.setSpacing(4)
-        name_title = QLabel("方向名称")
-        name_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        name_layout.addWidget(name_title)
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("留空时自动使用“领域 · 场景”")
-        self.name_input.setFixedHeight(32)
-        self.name_input.textChanged.connect(self._on_form_edited)
-        name_layout.addWidget(self.name_input)
-        metadata_row.addWidget(name_column, 2)
-
+        form_row = QHBoxLayout()
+        form_row.setSpacing(12)
         domain_column = QWidget()
         domain_layout = QVBoxLayout(domain_column)
         domain_layout.setContentsMargins(0, 0, 0, 0)
         domain_layout.setSpacing(4)
-        domain_label = QLabel("领域")
-        domain_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        domain_layout.addWidget(domain_label)
-        self.domain_row, self.domain_combo, self.domain_custom = self._build_custom_combo(
-            PRESET_DOMAINS
-        )
-        domain_layout.addLayout(self.domain_row)
-        metadata_row.addWidget(domain_column, 1)
+        domain_title = QLabel("领域")
+        domain_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        domain_layout.addWidget(domain_title)
+        self.domain_combo = self._build_editable_combo(PRESET_DOMAINS, "领域可直接输入自定义值")
+        self.domain_combo.setMinimumWidth(180)
+        self.domain_combo.setMaximumWidth(220)
+        self.domain_combo.currentTextChanged.connect(self._on_form_edited)
+        domain_layout.addWidget(self.domain_combo)
+        form_row.addWidget(domain_column)
+        form_row.addStretch(1)
 
         scene_column = QWidget()
         scene_layout = QVBoxLayout(scene_column)
         scene_layout.setContentsMargins(0, 0, 0, 0)
         scene_layout.setSpacing(4)
-        scene_label = QLabel("场景")
-        scene_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        scene_layout.addWidget(scene_label)
-        self.scene_row, self.scene_combo, self.scene_custom = self._build_custom_combo(PRESET_SCENES)
-        scene_layout.addLayout(self.scene_row)
-        metadata_row.addWidget(scene_column, 1)
-        form.addLayout(metadata_row)
+        scene_title = QLabel("场景")
+        scene_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        scene_layout.addWidget(scene_title)
+        self.scene_combo = self._build_editable_combo(PRESET_SCENES, "场景可直接输入自定义值")
+        self.scene_combo.setMinimumWidth(180)
+        self.scene_combo.setMaximumWidth(220)
+        self.scene_combo.currentTextChanged.connect(self._on_form_edited)
+        scene_layout.addWidget(self.scene_combo)
+        form_row.addWidget(scene_column)
+        card_layout.addLayout(form_row)
 
-        source_title = QLabel("论文摘要 / 内容概述")
+        self.advanced_toggle = QPushButton("高级选项")
+        self.advanced_toggle.setCheckable(True)
+        self.advanced_toggle.setStyleSheet(button_qss())
+        self.advanced_toggle.setToolTip("方向名称 / 摘要分析 / 背景要点 / 回答偏好")
+        self.advanced_toggle.toggled.connect(self._toggle_advanced)
+        card_layout.addWidget(self.advanced_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+
+        self.advanced_panel = QWidget()
+        self.advanced_panel.setObjectName("advancedPanel")
+        self.advanced_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.advanced_panel.setStyleSheet(
+            f"QWidget#advancedPanel {{ background: {CARD}; }}"
+        )
+        advanced_layout = QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(0, 2, 0, 0)
+        advanced_layout.setSpacing(8)
+
+        name_title = QLabel("方向名称（可选）")
+        name_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
+        advanced_layout.addWidget(name_title)
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("留空时自动使用“领域 · 场景”")
+        self.name_input.setFixedHeight(32)
+        self.name_input.textChanged.connect(self._on_form_edited)
+        advanced_layout.addWidget(self.name_input)
+
+        source_title = QLabel("论文摘要 / 内容概述（自动分析领域与背景）")
         source_title.setStyleSheet(f"color: {TEXT_SECONDARY};")
-        form.addWidget(source_title)
+        advanced_layout.addWidget(source_title)
         source_composer = QFrame()
         source_composer.setObjectName("sourceComposer")
         source_composer.setStyleSheet(
@@ -417,11 +333,12 @@ class WorkbenchPage(QWidget):
         self.context_source_input.setPlaceholderText(
             "粘贴论文摘要或专业内容概述，用于推荐领域、场景并提取回答上下文"
         )
+        self.context_source_input.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.context_source_input.setStyleSheet(
             "QTextEdit { border: none; background: transparent; padding: 4px 8px; "
             "selection-background-color: #EFF4FF; }"
         )
-        self.context_source_input.setFixedHeight(76)
+        self.context_source_input.setFixedHeight(64)
         self.context_source_input.textChanged.connect(self._update_analyze_button_state)
         composer_layout.addWidget(self.context_source_input, 1)
         self.analyze_context_button = ArrowSendButton()
@@ -440,327 +357,179 @@ class WorkbenchPage(QWidget):
             """
         )
         self.analyze_context_button.setProperty("active", False)
-        self.analyze_context_button.setToolTip("分析摘要并填入领域、场景与背景")
+        self.analyze_context_button.setToolTip("分析摘要，预览确认后填入领域、场景与背景")
         self.analyze_context_button.clicked.connect(self._analyze_context_source)
         composer_layout.addWidget(
             self.analyze_context_button, 0, Qt.AlignmentFlag.AlignBottom
         )
-        form.addWidget(source_composer)
+        advanced_layout.addWidget(source_composer)
         self.context_analysis_label = QLabel("")
         self.context_analysis_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        form.addWidget(self.context_analysis_label)
+        self.context_analysis_label.setWordWrap(True)
+        advanced_layout.addWidget(self.context_analysis_label)
 
         summary_title = QLabel("提取后的关键背景（会加入每次提问前）")
         summary_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        form.addWidget(summary_title)
+        advanced_layout.addWidget(summary_title)
         self.summary_input = QTextEdit()
         self.summary_input.setPlaceholderText("AI 会结合这些信息理解截图或文本，留空则按通用行为解释。")
         self.summary_input.setFixedHeight(58)
-        form.addWidget(self.summary_input)
+        self.summary_input.textChanged.connect(self._on_form_edited)
+        advanced_layout.addWidget(self.summary_input)
 
         instruction_title = QLabel("回答偏好")
         instruction_title.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        form.addWidget(instruction_title)
+        advanced_layout.addWidget(instruction_title)
         self.instruction_input = QLineEdit()
         self.instruction_input.setPlaceholderText("例如：专业术语附中文解释；长句分步骤说明")
         self.instruction_input.setFixedHeight(32)
-        form.addWidget(self.instruction_input)
+        self.instruction_input.textChanged.connect(self._on_form_edited)
+        advanced_layout.addWidget(self.instruction_input)
+
+        self.advanced_panel.setVisible(False)
+        card_layout.addWidget(self.advanced_panel)
 
         self.draft_warning_label = QLabel("有未保存修改，不会用于下一次识别")
         self.draft_warning_label.setStyleSheet(f"color: {DANGER}; font-size: {FONT_MICRO};")
         self.draft_warning_label.setVisible(False)
-        form.addWidget(self.draft_warning_label)
+        card_layout.addWidget(self.draft_warning_label)
 
-        footer = QHBoxLayout()
-        footer.setSpacing(8)
-        self.apply_direction_button = QPushButton("新建并应用")
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(8)
+        self.apply_direction_button = QPushButton("应用为当前方向")
         apply_primary_button_style(self.apply_direction_button)
-        self.apply_direction_button.clicked.connect(self._save_and_apply)
-        footer.addWidget(self.apply_direction_button)
-        self.save_as_new_button = QPushButton("另存为新方向")
+        self.apply_direction_button.clicked.connect(self._apply_direction)
+        actions_row.addWidget(self.apply_direction_button)
+        self.save_as_new_button = QPushButton("保存为新方向")
         self.save_as_new_button.setStyleSheet(button_qss())
+        self.save_as_new_button.setToolTip("保存到“已保存的方向”，以后可一键切换")
         self.save_as_new_button.clicked.connect(self._save_as_new)
-        footer.addWidget(self.save_as_new_button)
+        actions_row.addWidget(self.save_as_new_button)
         self.cancel_edit_button = QPushButton("取消")
         self.cancel_edit_button.setStyleSheet(button_qss())
         self.cancel_edit_button.clicked.connect(self._cancel_edit)
-        footer.addWidget(self.cancel_edit_button)
-        footer.addStretch(1)
-        form.addLayout(footer)
+        self.cancel_edit_button.setVisible(False)
+        actions_row.addWidget(self.cancel_edit_button)
+        actions_row.addStretch(1)
+        card_layout.addLayout(actions_row)
 
-        layout.addWidget(self.edit_form)
+        separator = QFrame()
+        separator.setFrameShape(QFrame.Shape.HLine)
+        separator.setStyleSheet(f"color: {BORDER};")
+        card_layout.addWidget(separator)
+
+        saved_title = QLabel("已保存的方向")
+        saved_title.setStyleSheet(f"color: {TEXT_SECONDARY}; font-weight: 600;")
+        card_layout.addWidget(saved_title)
+        self.direction_list = QListWidget()
+        self.direction_list.setObjectName("directionList")
+        self.direction_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.direction_list.setStyleSheet(
+            f"""
+            QListWidget#directionList {{ background: transparent; border: none; outline: 0; }}
+            QListWidget#directionList::item {{
+                background: transparent;
+                border: none;
+                padding: 0;
+            }}
+            QListWidget#directionList::item:selected {{ background: {PRIMARY_SOFT}; border-radius: 6px; }}
+            """
+        )
+        self.direction_list.setMaximumHeight(180)
+        self.direction_list.itemClicked.connect(self._on_direction_item_clicked)
+        card_layout.addWidget(self.direction_list)
+
+        repair_row = QHBoxLayout()
+        repair_row.setSpacing(8)
+        self.repair_notice_label = QLabel("")
+        self.repair_notice_label.setStyleSheet(f"color: {DANGER}; font-size: {FONT_MICRO};")
+        self.repair_notice_label.setWordWrap(True)
+        self.repair_button = QPushButton("整理")
+        self.repair_button.setStyleSheet(button_qss())
+        self.repair_button.clicked.connect(self._repair_directions)
+        self.repair_button.setVisible(False)
+        repair_row.addWidget(self.repair_notice_label, 1)
+        repair_row.addWidget(self.repair_button)
+        card_layout.addLayout(repair_row)
+
+        columns.addWidget(card, 1)
+        scroll.setWidget(centered)
+        outer.addWidget(scroll)
+
+    def _build_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("workbenchCard")
+        card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        card.setStyleSheet(
+            f"QFrame#workbenchCard {{ background: {CARD}; border: 1px solid {BORDER}; "
+            f"border-radius: {RADIUS_LG}; }}"
+        )
         return card
 
-    # ---- 学习建议清单（自沉淀：AI 建议 → 状态流转） ----
-
-    def _build_tips_card(self) -> QFrame:
-        card = self._build_card()
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
-
-        header = QHBoxLayout()
-        header.setSpacing(8)
-        header.addWidget(_card_title("学习建议"))
-        header.addStretch(1)
-        self.tips_scope_combo = ChevronComboBox()
-        self.tips_scope_combo.addItem("待处理", "pending")
-        self.tips_scope_combo.addItem("已完成", "done")
-        self.tips_scope_combo.addItem("全部", "")
-        self.tips_scope_combo.setFixedWidth(88)
-        self.tips_scope_combo.setToolTip("按状态筛选建议")
-        self.tips_scope_combo.currentIndexChanged.connect(self.refresh_tips)
-        header.addWidget(self.tips_scope_combo)
-        layout.addLayout(header)
-
-        self.tips_list = QWidget()
-        self.tips_list_layout = QVBoxLayout(self.tips_list)
-        self.tips_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.tips_list_layout.setSpacing(6)
-        layout.addWidget(self.tips_list)
-        return card
-
-    def refresh_tips(self) -> None:
-        scope = "pending"
-        if hasattr(self, "tips_scope_combo"):
-            scope = str(self.tips_scope_combo.currentData() or "pending")
-        tips = self.history_store.list_learning_tips(status=scope, limit=60)
-        while self.tips_list_layout.count():
-            item = self.tips_list_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        if not tips:
-            empty = QLabel("暂无学习建议。截图解释给出的建议会自动沉淀到这里。")
-            empty.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-            empty.setWordWrap(True)
-            self.tips_list_layout.addWidget(empty)
-            return
-        for tip in tips:
-            self.tips_list_layout.addWidget(self._build_tip_row(tip))
-
-    def _build_tip_row(self, tip: LearningTip) -> QWidget:
-        row = QFrame()
-        row.setStyleSheet(
-            f"QFrame {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: {RADIUS_MD}; }}"
-        )
-        box = QVBoxLayout(row)
-        box.setContentsMargins(10, 8, 10, 8)
-        box.setSpacing(6)
-
-        content = QLabel(tip.content)
-        content.setWordWrap(True)
-        content.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 13px;")
-        box.addWidget(content)
-
-        meta_row = QHBoxLayout()
-        meta_row.setSpacing(6)
-        meta = QLabel(f"{tip.domain or '通用'} · {tip.created_at.replace('T', ' ')[:16]}")
-        meta.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        meta_row.addWidget(meta)
-        meta_row.addStretch(1)
-        if tip.status == "pending":
-            done_button = QPushButton("完成")
-            done_button.setStyleSheet(button_qss())
-            done_button.clicked.connect(
-                lambda checked=False, t=tip.id: self._set_tip_status(t, "done")
-            )
-            ignore_button = QPushButton("忽略")
-            ignore_button.setStyleSheet(button_qss())
-            ignore_button.clicked.connect(
-                lambda checked=False, t=tip.id: self._set_tip_status(t, "ignored")
-            )
-            meta_row.addWidget(done_button)
-            meta_row.addWidget(ignore_button)
-        box.addLayout(meta_row)
-        return row
-
-    def _set_tip_status(self, tip_id: int, status: str) -> None:
-        self.history_store.set_learning_tip_status(tip_id, status)
-        self.refresh_tips()
-
-    # ---- 自沉淀：把最近内容合并进当前学习方向 ----
-
-    def _build_digest_card(self) -> QFrame:
-        card = self._build_card()
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
-        layout.addWidget(_card_title("自沉淀"))
-        hint = QLabel(
-            "把最近学到的内容合并进当前学习方向的背景要点，让 AI 解释越用越懂你。"
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        layout.addWidget(hint)
-        self.digest_button = QPushButton("把最近内容沉淀进当前方向")
-        self.digest_button.setStyleSheet(button_qss())
-        self.digest_button.setToolTip("合并后需人工确认才会写入，绝不静默修改")
-        self.digest_button.clicked.connect(self._start_digest)
-        layout.addWidget(self.digest_button)
-        self.digest_status_label = QLabel("")
-        self.digest_status_label.setStyleSheet(f"color: {MUTED}; font-size: {FONT_MICRO};")
-        self.digest_status_label.setWordWrap(True)
-        layout.addWidget(self.digest_status_label)
-        return card
-
-    def _digest_cursor(self, context_id: int) -> int:
-        raw = self.history_store.get_settings().get(f"digest_after_{context_id}", "")
-        return int(raw) if str(raw).strip().isdigit() else 0
-
-    def _set_digest_cursor(self, context_id: int, capture_id: int) -> None:
-        self.history_store.set_setting(f"digest_after_{context_id}", str(capture_id))
-
-    def _start_digest(self) -> None:
-        context = self._current_context()
-        if context is None:
-            QMessageBox.information(
-                self,
-                "自沉淀",
-                "请先在“自定义方向”中新建或选择一个学习方向，才能把内容沉淀进它的背景要点。",
-            )
-            return
-        domain = context.domain or "通用"
-        captures = self.history_store.search_captures_advanced(domain=domain, limit=200)
-        cursor = self._digest_cursor(context.id)
-        new_captures = sorted(
-            (capture for capture in captures if capture.id > cursor),
-            key=lambda capture: capture.id,
-        )[:15]
-        if not new_captures:
-            QMessageBox.information(self, "自沉淀", "当前方向暂无新内容可沉淀。")
-            return
-        items: list[str] = []
-        for capture in new_captures:
-            text = " ".join(
-                part for part in (capture.translation, capture.explanation) if part
-            )
-            if text.strip():
-                items.append(text.strip()[:300])
-        if not items:
-            QMessageBox.information(self, "自沉淀", "当前方向暂无新内容可沉淀。")
-            return
-        self.digest_status_label.setText(f"正在合并 {len(items)} 条新内容…")
-        self.digest_button.setEnabled(False)
-        self._digest_worker = DigestWorker(
-            existing_summary=context.summary or "",
-            new_items="\n".join(items),
-            settings=self.settings_service.load(),
-            last_capture_id=new_captures[-1].id,
-        )
-        self._digest_worker.completed.connect(self._on_digest_done)
-        self._digest_worker.finished.connect(self._digest_worker.deleteLater)
-        self._digest_worker.start()
-
-    def _on_digest_done(self, payload: dict) -> None:
-        self.digest_button.setEnabled(True)
-        if payload.get("error"):
-            self.digest_status_label.setText(str(payload["error"]))
-            return
-        merged = str(payload.get("summary") or "").strip()
-        if not merged:
-            self.digest_status_label.setText("生成失败：AI 未返回内容，背景要点未改动。")
-            return
-        context = self._current_context()
-        if context is None:
-            self.digest_status_label.setText("当前学习方向已变化，背景要点未改动。")
-            return
-        dialog = SummaryPreviewDialog(context.summary or "", merged, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            self.digest_status_label.setText("已取消，背景要点未改动。")
-            return
-        self.history_store.save_context(
-            name=context.name,
-            domain=context.domain or "通用",
-            scene=context.scene or "通用",
-            summary=merged,
-            instruction=context.instruction or "",
-            context_id=context.id,
-        )
-        self._set_digest_cursor(context.id, int(payload.get("last_capture_id") or 0))
-        self.digest_status_label.setText("已沉淀到当前学习方向。")
-        self.context_changed.emit(context.id)
-        self.refresh_directions()
-
-    def _build_custom_combo(self, presets: list[str]) -> tuple[QVBoxLayout, QComboBox, QLineEdit]:
-        row = QVBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        combo = ChevronComboBox()
+    @staticmethod
+    def _build_editable_combo(presets: list[str], tooltip: str) -> QComboBox:
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         combo.addItems(presets)
-        combo.addItem(CUSTOM_ITEM)
         combo.setMinimumHeight(32)
-        custom = QLineEdit()
-        custom.setPlaceholderText("输入自定义值后生效")
-        custom.setMinimumWidth(120)
-        custom.setMinimumHeight(32)
-        custom.hide()
-        combo.currentTextChanged.connect(
-            lambda text, c=combo, w=custom: self._on_custom_combo_changed(c, w, text)
-        )
-        combo.currentTextChanged.connect(self._on_form_edited)
-        custom.textChanged.connect(self._on_form_edited)
-        row.addWidget(combo)
-        row.addWidget(custom)
-        return row, combo, custom
+        combo.setToolTip(tooltip)
+        return combo
 
-    def _on_custom_combo_changed(self, combo: QComboBox, custom: QLineEdit, text: str) -> None:
-        custom.setVisible(text == CUSTOM_ITEM)
-        if text == CUSTOM_ITEM:
-            custom.setFocus()
+    def _toggle_advanced(self, checked: bool) -> None:
+        self.advanced_panel.setVisible(checked)
+        self.advanced_toggle.setText("收起高级选项" if checked else "高级选项")
 
-    def _set_combo_value(self, combo: QComboBox, custom: QLineEdit, value: str) -> None:
-        if value == CUSTOM_ITEM:
-            combo.setCurrentText(CUSTOM_ITEM)
-            custom.show()
-            return
-        if combo.findText(value) < 0:
-            combo.insertItem(combo.count() - 1, value)
-        combo.setCurrentText(value)
-        custom.hide()
-
-    def _set_quick_combo_value(self, combo: QComboBox, value: str) -> None:
-        if combo.findText(value) < 0:
-            combo.addItem(value)
-        combo.setCurrentText(value)
-
-    def _combo_value(self, combo: QComboBox, custom: QLineEdit) -> str:
-        if not custom.isHidden():
-            typed = custom.text().strip()
-            if typed:
-                return typed
-        text = combo.currentText().strip()
-        return "" if text == CUSTOM_ITEM else text
+    # ---- 表单值 ----
 
     def _form_values(self) -> tuple[str, str, str, str, str]:
         name = self.name_input.text().strip()
-        domain = self._combo_value(self.domain_combo, self.domain_custom).strip() or "通用"
-        scene = self._combo_value(self.scene_combo, self.scene_custom).strip() or "通用"
+        domain = self.domain_combo.currentText().strip() or "通用"
+        scene = self.scene_combo.currentText().strip() or "通用"
         summary = self.summary_input.toPlainText().strip()
         instruction = self.instruction_input.text().strip()
         return name, domain, scene, summary, instruction
 
+    def _resolved_form_name(self, domain: str, scene: str) -> str:
+        typed = self.name_input.text().strip()
+        if not typed:
+            return _direction_name(domain, scene)
+        if self._editing_context_id is not None:
+            record = self.history_store.get_context(self._editing_context_id)
+            if record is not None and typed == (record.name or ""):
+                old_derived = _direction_name(record.domain or "通用", record.scene or "通用")
+                if typed == old_derived:
+                    return _direction_name(domain, scene)
+        return typed
+
     def _form_dirty(self) -> bool:
-        base_name, base_domain, base_scene = "", "通用", "通用"
-        base_summary, base_instruction = "", ""
+        return self._form_values() != self._base_values()
+
+    def _base_values(self) -> tuple[str, str, str, str, str]:
         if self._editing_context_id is not None:
             record = self.history_store.get_context(self._editing_context_id)
             if record is not None:
-                base_name = record.name or ""
-                base_domain = record.domain or "通用"
-                base_scene = record.scene or "通用"
-                base_summary = record.summary or ""
-                base_instruction = record.instruction or ""
-        return self._form_values() != (
-            base_name,
-            base_domain,
-            base_scene,
-            base_summary,
-            base_instruction,
-        )
+                return (
+                    record.name or "",
+                    record.domain or "通用",
+                    record.scene or "通用",
+                    record.summary or "",
+                    record.instruction or "",
+                )
+        current = self._current_context()
+        if current is not None:
+            return (
+                current.name or "",
+                current.domain or "通用",
+                current.scene or "通用",
+                current.summary or "",
+                current.instruction or "",
+            )
+        quick_domain, quick_scene = self.settings_service.get_quick_context()
+        return ("", quick_domain, quick_scene, "", "")
 
     def _on_form_edited(self, *args) -> None:
-        self.draft_warning_label.setVisible(self._form_open and self._form_dirty())
+        self.draft_warning_label.setVisible(self._form_dirty())
 
     def _update_analyze_button_state(self, *args) -> None:
         active = bool(self.context_source_input.toPlainText().strip())
@@ -768,6 +537,28 @@ class WorkbenchPage(QWidget):
         self.analyze_context_button.style().unpolish(self.analyze_context_button)
         self.analyze_context_button.style().polish(self.analyze_context_button)
         self.analyze_context_button.update()
+
+    def _load_form(self, record: ContextRecord) -> None:
+        self.name_input.setText(record.name or "")
+        self.domain_combo.setCurrentText(record.domain or "通用")
+        self.scene_combo.setCurrentText(record.scene or "通用")
+        self.summary_input.setPlainText(record.summary or "")
+        self.instruction_input.setText(record.instruction or "")
+        self.context_source_input.clear()
+        self.context_analysis_label.clear()
+        self.draft_warning_label.setVisible(False)
+
+    def _load_quick_form(self, domain: str, scene: str) -> None:
+        self.name_input.clear()
+        self.domain_combo.setCurrentText(domain or "通用")
+        self.scene_combo.setCurrentText(scene or "通用")
+        self.summary_input.clear()
+        self.instruction_input.clear()
+        self.context_source_input.clear()
+        self.context_analysis_label.clear()
+        self.draft_warning_label.setVisible(False)
+
+    # ---- 摘要分析（预览确认后填入） ----
 
     def _analyze_context_source(self) -> None:
         source = self.context_source_input.toPlainText().strip()
@@ -786,143 +577,66 @@ class WorkbenchPage(QWidget):
             if word.casefold() in source_folded
         ]
         keywords = list(dict.fromkeys(signal_words + extract_keywords(source, limit=10)))[:10]
-        self._set_combo_value(self.domain_combo, self.domain_custom, domain)
-        self._set_combo_value(self.scene_combo, self.scene_custom, scene)
-        parts: list[str] = []
-        if keywords:
-            parts.append("核心关键词：" + "、".join(keywords))
-        parts.append("摘要概述：" + source[:1600])
-        self.summary_input.setPlainText("\n".join(parts))
+        summary_preview = "\n".join(
+            part
+            for part in (
+                f"核心关键词：{'、'.join(keywords)}" if keywords else "",
+                f"摘要概述：{source[:1600]}",
+            )
+            if part
+        )
+        dialog = DirectionAnalysisPreviewDialog(
+            domain=domain,
+            scene=scene,
+            keywords=keywords,
+            summary_preview=summary_preview,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.apply_requested():
+            self.context_analysis_label.setText("已取消，未改动表单。")
+            return
+        self._apply_analysis(domain, scene, keywords, summary_preview)
+
+    def _apply_analysis(
+        self,
+        domain: str,
+        scene: str,
+        keywords: list[str],
+        summary_preview: str,
+    ) -> None:
+        self.domain_combo.setCurrentText(domain)
+        self.scene_combo.setCurrentText(scene)
+        self.summary_input.setPlainText(summary_preview)
         keyword_text = "、".join(keywords) if keywords else "未提取到稳定关键词"
         self.context_analysis_label.setText(
-            f"建议：{domain} · {scene}　关键词：{keyword_text}。保存后才会用于回答。"
+            f"已填入：{domain} · {scene}　命中关键词：{keyword_text}。保存后才会用于回答。"
         )
 
-    def _load_form(self, record: ContextRecord | None) -> None:
-        name = record.name if record is not None else ""
-        domain = record.domain if record is not None else "通用"
-        scene = record.scene if record is not None else "通用"
-        summary = record.summary if record is not None else ""
-        instruction = record.instruction if record is not None else ""
-        self.name_input.setText(name)
-        self._set_combo_value(self.domain_combo, self.domain_custom, domain)
-        self._set_combo_value(self.scene_combo, self.scene_custom, scene)
-        self.summary_input.setPlainText(summary)
-        self.instruction_input.setText(instruction)
-        self.context_source_input.clear()
-        self.context_analysis_label.clear()
+    # ---- 动作 ----
 
-    def _current_context(self) -> ContextRecord | None:
-        context_id = self.settings_service.load().current_context_id
-        if context_id is None:
-            return None
-        record = self.history_store.get_context(context_id)
-        if record is None or record.builtin:
-            return None
-        return record
-
-    def _open_edit_form(self) -> None:
-        self._form_open = True
-        self.direction_edit_card.show()
-        self.edit_form.show()
-        self._refresh_editor_state()
-        self.draft_warning_label.setVisible(self._form_dirty())
-
-    def _close_edit_form(self) -> None:
-        self._form_open = True
-        self.direction_edit_card.show()
-        self.edit_form.show()
-        self.context_source_input.clear()
-        self.context_analysis_label.clear()
-        self.draft_warning_label.setVisible(False)
-
-    def _cancel_edit(self) -> None:
-        record = None
+    def _apply_direction(self) -> None:
+        name, domain, scene, summary, instruction = self._form_values()
         if self._editing_context_id is not None:
-            record = self.history_store.get_context(self._editing_context_id)
-            if record is not None and record.builtin:
-                record = None
-        self._load_form(record)
-        self._close_edit_form()
-
-    def _new_direction(self) -> None:
-        self._editing_context_id = None
-        self._load_form(None)
-        self._open_edit_form()
-
-    def _edit_current_direction(self) -> None:
-        current = self._current_context()
-        if current is not None:
-            self._edit_direction(current.id)
-
-    def _delete_current_direction(self) -> None:
-        current = self._current_context()
-        if current is not None:
-            self._delete_direction(current.id)
-
-    def _refresh_editor_state(self) -> None:
-        record = None
-        if self._editing_context_id is not None:
-            record = self.history_store.get_context(self._editing_context_id)
-        if record is None or record.builtin:
-            self.editing_target_label.setText("新建学习方向")
-            self.save_as_new_button.hide()
-            self.apply_direction_button.setText("新建并应用")
-        else:
-            self.editing_target_label.setText(f"正在编辑：{_record_display(record)}")
-            self.save_as_new_button.show()
-            self.apply_direction_button.setText("保存修改并应用")
-
-    def _resolved_form_name(self, domain: str, scene: str) -> str:
-        typed = self.name_input.text().strip()
-        if not typed:
-            return _direction_name(domain, scene)
-        if self._editing_context_id is not None:
-            record = self.history_store.get_context(self._editing_context_id)
-            if record is not None and typed == (record.name or ""):
-                old_derived = _direction_name(record.domain or "通用", record.scene or "通用")
-                if typed == old_derived:
-                    return _direction_name(domain, scene)
-        return typed
-
-    def _save_and_apply(self) -> None:
-        """只更新明确选择的记录；无目标时新建。保存后设为当前方向。"""
-        _name, domain, scene, summary, instruction = self._form_values()
-        name = self._resolved_form_name(domain, scene)
-        context_id = self._editing_context_id
-        if context_id is not None:
-            record = self.history_store.get_context(context_id)
-            if record is None or record.builtin:
-                context_id = None
-        if context_id is None:
             context_id = self.history_store.save_context(
-                name=name,
+                name=self._resolved_form_name(domain, scene),
                 domain=domain,
                 scene=scene,
                 summary=summary,
                 instruction=instruction,
+                context_id=self._editing_context_id,
             )
+            self._editing_context_id = context_id
+            self.settings_service.set_current_context(context_id)
+            self.context_changed.emit(context_id)
         else:
-            context_id = self.history_store.save_context(
-                name=name,
-                domain=domain,
-                scene=scene,
-                summary=summary,
-                instruction=instruction,
-                context_id=context_id,
-            )
-        self._editing_context_id = context_id
-        self.settings_service.set_current_context(context_id)
-        self.context_changed.emit(context_id)
-        self.refresh_directions()
-        self._close_edit_form()
+            self.settings_service.set_quick_context(domain, scene)
+            self.context_changed.emit(None)
+        self.refresh_directions(force=True)
 
     def _save_as_new(self) -> None:
-        """始终插入新记录，不做隐式领域复用，不覆盖任何已有方向。"""
-        _name, domain, scene, summary, instruction = self._form_values()
-        name = self._resolved_form_name(domain, scene)
+        name, domain, scene, summary, instruction = self._form_values()
         context_id = self.history_store.save_context(
-            name=name,
+            name=self._resolved_form_name(domain, scene),
             domain=domain,
             scene=scene,
             summary=summary,
@@ -931,29 +645,17 @@ class WorkbenchPage(QWidget):
         self._editing_context_id = context_id
         self.settings_service.set_current_context(context_id)
         self.context_changed.emit(context_id)
-        self.refresh_directions()
-        self._close_edit_form()
+        self.refresh_directions(force=True)
+
+    def _cancel_edit(self) -> None:
+        self._editing_context_id = None
+        self.refresh_directions(force=True)
 
     def _reset_direction(self) -> None:
         """恢复通用方向：只改当前指向，不删除任何已保存方向。"""
         self.settings_service.set_quick_context("通用", "通用")
         self.context_changed.emit(None)
-        self.refresh_directions()
-
-    def _apply_quick_direction(self) -> None:
-        domain = self.quick_domain_combo.currentText() or "通用"
-        scene = self.quick_scene_combo.currentText() or "通用"
-        current = self._current_context()
-        if current is not None and (
-            domain,
-            scene,
-        ) == (current.domain or "通用", current.scene or "通用"):
-            self.context_changed.emit(current.id)
-            self.refresh_directions()
-            return
-        self.settings_service.set_quick_context(domain, scene)
-        self.context_changed.emit(None)
-        self.refresh_directions()
+        self.refresh_directions(force=True)
 
     def _switch_to(self, context_id: int | None) -> None:
         """切换只改当前指向，绝不修改任何记录的领域/场景/背景。"""
@@ -971,7 +673,7 @@ class WorkbenchPage(QWidget):
             return
         self._editing_context_id = record.id
         self._load_form(record)
-        self._open_edit_form()
+        self._sync_action_buttons()
 
     def _delete_direction(self, context_id: int) -> None:
         record = self.history_store.get_context(context_id)
@@ -993,72 +695,105 @@ class WorkbenchPage(QWidget):
         if settings.current_context_id == context_id:
             self.settings_service.set_current_context(None)
             self.context_changed.emit(None)
-        self.refresh_directions()
+        self.refresh_directions(force=True)
 
-    def _on_direction_selected(self, index: int) -> None:
-        if self._refreshing_direction_selector or index < 0:
-            return
-        context_id = self.direction_selector.itemData(index)
-        if context_id is not None:
-            self._switch_to(context_id)
+    def _current_context(self) -> ContextRecord | None:
+        context_id = self.settings_service.load().current_context_id
+        if context_id is None:
+            return None
+        record = self.history_store.get_context(context_id)
+        if record is None or record.builtin:
+            return None
+        return record
 
-    # ---- 刷新 ----
-
-    def refresh_directions(self) -> None:
-        current = self._current_context()
-        quick_domain, quick_scene = self.settings_service.get_quick_context()
-        if current is not None:
-            effective_display = _direction_name(
-                current.domain or "通用", current.scene or "通用"
-            )
-            quick_display_domain = current.domain or "通用"
-            quick_display_scene = current.scene or "通用"
+    def _sync_action_buttons(self) -> None:
+        if self._editing_context_id is not None:
+            self.apply_direction_button.setText("保存修改并应用")
+            self.save_as_new_button.setText("另存为新方向")
+            self.cancel_edit_button.setVisible(True)
         else:
-            effective_display = _direction_name(quick_domain, quick_scene)
-            quick_display_domain = quick_domain
-            quick_display_scene = quick_scene
-        self.direction_status_label.setText(effective_display)
-        self._set_quick_combo_value(self.quick_domain_combo, quick_display_domain)
-        self._set_quick_combo_value(self.quick_scene_combo, quick_display_scene)
-        self._rebuild_direction_selector(current)
-        self._refresh_repair_notice()
-        if not self._form_open or (
-            self._editing_context_id is None and not self._form_dirty() and current is not None
-        ):
-            self._editing_context_id = current.id if current is not None else None
-            self._load_form(current)
-        self.draft_warning_label.setVisible(self._form_open and self._form_dirty())
-        self.direction_edit_card.show()
-        self._refresh_editor_state()
-        has_current = current is not None
-        self.edit_direction_button.setEnabled(has_current)
-        self.delete_direction_button.setEnabled(has_current)
-        self.reset_direction_button.setEnabled(
-            has_current or quick_domain != "通用" or quick_scene != "通用"
-        )
+            self.apply_direction_button.setText("应用为当前方向")
+            self.save_as_new_button.setText("保存为新方向")
+            self.cancel_edit_button.setVisible(False)
 
-    def _rebuild_direction_selector(self, current: ContextRecord | None) -> None:
+    # ---- 已保存方向列表 ----
+
+    def _rebuild_direction_list(self) -> None:
+        current = self._current_context()
         current_id = current.id if current is not None else None
         records = [record for record in self.history_store.list_contexts() if not record.builtin]
         name_counts: dict[str, int] = {}
         for record in records:
             label = _record_display(record)
             name_counts[label] = name_counts.get(label, 0) + 1
-        self._refreshing_direction_selector = True
-        try:
-            self.direction_selector.clear()
-            self.direction_selector.addItem("选择已保存的自定义方向", None)
-            selected_index = 0
-            for record in records:
-                label = _record_display(record)
-                if name_counts[label] > 1:
-                    label = f"{label}  ·  #{record.id}"
-                self.direction_selector.addItem(label, record.id)
-                if record.id == current_id:
-                    selected_index = self.direction_selector.count() - 1
-            self.direction_selector.setCurrentIndex(selected_index)
-        finally:
-            self._refreshing_direction_selector = False
+        self.direction_list.clear()
+        if not records:
+            placeholder = QListWidgetItem("还没有保存的方向——填好领域 / 场景后点「保存为新方向」")
+            placeholder.setFlags(placeholder.flags() & ~Qt.ItemFlag.ItemIsSelectable)
+            self.direction_list.addItem(placeholder)
+            return
+        for record in records:
+            display = _record_display(record)
+            if name_counts.get(display, 0) > 1:
+                display = f"{display}  ·  #{record.id}"
+            item = QListWidgetItem()
+            item.setData(Qt.ItemDataRole.UserRole, record.id)
+            row_widget = self._build_direction_row(display, record, record.id == current_id)
+            item.setSizeHint(QSize(0, row_widget.sizeHint().height()))
+            self.direction_list.addItem(item)
+            self.direction_list.setItemWidget(item, row_widget)
+
+    def _build_direction_row(
+        self,
+        display: str,
+        record: ContextRecord,
+        is_current: bool,
+    ) -> QWidget:
+        row = QWidget()
+        row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        row.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(6, 3, 6, 3)
+        layout.setSpacing(6)
+
+        name_label = QLabel(display)
+        name_label.setStyleSheet(f"color: {TEXT}; font-size: 13px; background: transparent;")
+        layout.addWidget(name_label, 1)
+
+        if is_current:
+            badge = QLabel("✓ 当前")
+            badge.setStyleSheet(
+                f"color: {PRIMARY_DARK}; background: {PRIMARY_SOFT}; "
+                f"border-radius: 10px; padding: 2px 8px; font-size: {FONT_MICRO};"
+            )
+            layout.addWidget(badge)
+
+        use_button = QPushButton("使用")
+        use_button.setStyleSheet(_ROW_BUTTON_QSS)
+        use_button.clicked.connect(
+            lambda checked=False, cid=record.id: self._switch_to(cid)
+        )
+        layout.addWidget(use_button)
+
+        edit_button = QPushButton("编辑")
+        edit_button.setStyleSheet(_ROW_BUTTON_QSS)
+        edit_button.clicked.connect(
+            lambda checked=False, cid=record.id: self._edit_direction(cid)
+        )
+        layout.addWidget(edit_button)
+
+        delete_button = QPushButton("删除")
+        delete_button.setStyleSheet(_ROW_BUTTON_QSS)
+        delete_button.clicked.connect(
+            lambda checked=False, cid=record.id: self._delete_direction(cid)
+        )
+        layout.addWidget(delete_button)
+        return row
+
+    def _on_direction_item_clicked(self, item: QListWidgetItem) -> None:
+        context_id = item.data(Qt.ItemDataRole.UserRole)
+        if context_id is not None:
+            self._switch_to(int(context_id))
 
     # ---- 错位数据整理（预览确认，绝不静默） ----
 
@@ -1090,7 +825,7 @@ class WorkbenchPage(QWidget):
             scene_part = parts[1].strip()
             if domain_part in PRESET_DOMAINS:
                 domain = domain_part
-            if scene_part and scene_part != CUSTOM_ITEM:
+            if scene_part:
                 scene = scene_part
         elif name in PRESET_DOMAINS:
             domain = name
@@ -1100,7 +835,7 @@ class WorkbenchPage(QWidget):
         count = len(self._repair_proposals())
         if count:
             self.repair_notice_label.setText(
-                f"发现 {count} 条名称与领域/场景不一致的方向，建议整理。"
+                f"发现 {count} 条方向名称与领域/场景不一致，建议整理。"
             )
             self.repair_button.setVisible(True)
         else:
@@ -1136,7 +871,7 @@ class WorkbenchPage(QWidget):
                 instruction=record.instruction or "",
                 context_id=record.id,
             )
-        self.refresh_directions()
+        self.refresh_directions(force=True)
         if current_id is not None and any(item["record"].id == current_id for item in selected):
             self.context_changed.emit(current_id)
         return len(selected)
@@ -1147,3 +882,37 @@ class WorkbenchPage(QWidget):
         path = backup_dir / f"app-backup-repair-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.db"
         shutil.copy2(self.history_store.db_path, path)
         return path
+
+    # ---- 刷新 ----
+
+    def refresh_directions(self, force: bool = False) -> None:
+        current = self._current_context()
+        quick_domain, quick_scene = self.settings_service.get_quick_context()
+        if current is not None:
+            display = _record_display(current)
+            source = "已保存"
+        else:
+            display = _direction_name(quick_domain, quick_scene)
+            source = "临时"
+        self.direction_status_label.setText(f"当前生效：{display}（{source}）")
+        self.reset_direction_button.setEnabled(
+            current is not None or quick_domain != "通用" or quick_scene != "通用"
+        )
+
+        if self._editing_context_id is not None:
+            record = self.history_store.get_context(self._editing_context_id)
+            if record is None:
+                self._editing_context_id = None
+                self._load_quick_form(quick_domain, quick_scene)
+            elif force or not self._form_dirty():
+                self._load_form(record)
+        elif force or not self._form_dirty():
+            if current is not None:
+                self._load_form(current)
+            else:
+                self._load_quick_form(quick_domain, quick_scene)
+
+        self._rebuild_direction_list()
+        self._refresh_repair_notice()
+        self._sync_action_buttons()
+        self.draft_warning_label.setVisible(self._form_dirty())

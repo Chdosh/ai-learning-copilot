@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from app.services.ai_client import AIClientError, extract_stream_terms
 from app.services.history_store import HistoryStore
+from app.services.knowledge_base import KnowledgeBase, TermQuery, TipQuery
 from app.services.settings import AppSettings
 from app.ui import workers
 from app.ui.result_window import ResultWindow
@@ -419,6 +420,63 @@ def test_stream_capture_retry_updates_existing_capture(tmp_path, monkeypatch) ->
     assert record.translation == "超过 Token 限制"
     assert record.explanation == "输入内容太长，需要缩短。"
     assert record.tags == ["AI", "报错"]
+
+
+def test_stream_capture_retry_uses_the_active_direction_for_all_knowledge(
+    tmp_path, monkeypatch
+) -> None:
+    store = HistoryStore(tmp_path / "app.db")
+    old_context_id = store.save_context(
+        name="Python basics",
+        domain="编程",
+        scene="技术文档",
+    )
+    active_context_id = store.save_context(
+        name="LLM debugging",
+        domain="编程",
+        scene="报错排查",
+    )
+    capture_id = store.save_capture(
+        image_path="/tmp/fail.png",
+        source_text="Token limit exceeded",
+        translation="",
+        explanation="",
+        tags=["待处理"],
+        category="",
+        domain="编程",
+        context_id=old_context_id,
+    )
+    settings = AppSettings(
+        api_key="test-key",
+        save_screenshots=True,
+        current_context_id=active_context_id,
+    )
+    monkeypatch.setattr(workers, "AIClient", _FakeStreamingClient)
+    worker = workers.CaptureStreamWorker(
+        image_path="/tmp/fail.png",
+        settings=settings,
+        ocr_service=_FakeOCR(),
+        history_store=store,
+        capture_id=capture_id,
+        source_text="Token limit exceeded",
+    )
+    completed: list[dict] = []
+    worker.completed.connect(completed.append)
+
+    worker.run()
+
+    assert "error" not in completed[0]
+
+    kb = KnowledgeBase(store)
+    page = kb.query_terms(
+        TermQuery(
+            view="current_direction",
+            current_context_id=active_context_id,
+            effective_domain="编程",
+        )
+    )
+    assert [item.term.term for item in page.items] == ["Token"]
+    assert kb.list_tips(TipQuery(status="pending"))[0].context_id == active_context_id
 
 
 def test_followup_worker_streams_and_persists(tmp_path, monkeypatch) -> None:

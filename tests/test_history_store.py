@@ -156,7 +156,7 @@ def test_history_store_saves_and_searches_capture(tmp_path) -> None:
 def test_history_store_upserts_terms(tmp_path) -> None:
     store = HistoryStore(tmp_path / "app.db")
 
-    store.upsert_terms(
+    store._upsert_terms(
         [
             {
                 "term": "token",
@@ -166,7 +166,7 @@ def test_history_store_upserts_terms(tmp_path) -> None:
             }
         ]
     )
-    store.upsert_terms(
+    store._upsert_terms(
         [
             {
                 "term": "token",
@@ -207,8 +207,8 @@ def test_terms_store_by_domain_separately(tmp_path) -> None:
     store = HistoryStore(tmp_path / "app.db")
     base = {"chinese_name": "向量", "beginner_explanation": "解释", "examples": []}
 
-    store.upsert_terms([{"term": "向量", **base}], domain="编程")
-    store.upsert_terms([{"term": "向量", **base}], domain="数学")
+    store._upsert_terms([{"term": "向量", **base}], domain="编程")
+    store._upsert_terms([{"term": "向量", **base}], domain="数学")
 
     terms = store.list_terms()
     assert len(terms) == 2
@@ -218,7 +218,7 @@ def test_terms_store_by_domain_separately(tmp_path) -> None:
     assert len(programming) == 1 and programming[0].domain == "编程"
     assert len(store.list_terms(domain="数学")) == 1
 
-    store.upsert_terms([{"term": "向量", **base}], domain="编程")
+    store._upsert_terms([{"term": "向量", **base}], domain="编程")
     assert len(store.list_terms(domain="编程")) == 1
     assert store.list_terms(domain="编程")[0].review_count == 2
 
@@ -226,7 +226,7 @@ def test_terms_store_by_domain_separately(tmp_path) -> None:
 def test_terms_pagination_and_count(tmp_path) -> None:
     store = HistoryStore(tmp_path / "app.db")
     for index in range(25):
-        store.upsert_terms(
+        store._upsert_terms(
             [{"term": f"term-{index}", "chinese_name": "", "beginner_explanation": "", "examples": []}]
         )
 

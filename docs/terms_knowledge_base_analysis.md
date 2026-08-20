@@ -1,5 +1,9 @@
 # 术语本 → 个人知识库：全方位分析与演进设计
 
+> 文档状态：历史分析。本文记录知识脊柱实施前的术语问题，部分数据结构和阶段名称已经过期，不作为当前实现计划。
+>
+> 当前唯一方案：[personal_knowledge_base_plan.md](personal_knowledge_base_plan.md)；已完成底座：[knowledge_spine_design.md](knowledge_spine_design.md)。
+>
 > 分析范围：术语本（terms）在"沉淀个人知识库"方向上的现状、缺口、目标形态与演进路线。
 > 依据：`app/services/history_store.py`、`app/ui/main_window.py`、`app/ui/workers.py`、`app/services/prompt_builder.py`、`app/services/embedding.py`、`app/services/context_detector.py`、`docs/embedding_reserved_notes.md`、`docs/ROADMAP.md`、`docs/TODO.md`、`docs/design_system.md`。
 
