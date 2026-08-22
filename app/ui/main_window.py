@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, QThread, Signal
@@ -57,6 +57,7 @@ from app.ui.learning_page import LearningPage
 from app.ui.overview import OverviewPage
 from app.ui.result_window import ResultWindow
 from app.ui.review import ReviewDialog
+from app.ui.statistics_widgets import ActivityHeatmap, CategoryDonut, learning_streak
 from app.ui.theme import (
     APP_STYLE,
     BG,
@@ -624,6 +625,7 @@ class MainWindow(QMainWindow):
         self._add_page(sidebar_layout, "学习", self.learning_page)
         self._add_page(sidebar_layout, "术语本", self._build_terms_page())
         self._add_page(sidebar_layout, "工作台", self.workbench_page)
+        self._add_page(sidebar_layout, "统计", self._build_stats_page())
         self._add_page(sidebar_layout, "设置", self._build_settings_page())
         self.capture_sidebar_button = _primary_button("按下截图")
         self.capture_sidebar_button.setFixedHeight(32)
@@ -781,6 +783,8 @@ class MainWindow(QMainWindow):
         elif index == 2:
             self.refresh_terms()
         elif index == 4:
+            self.refresh_stats()
+        elif index == 5:
             self.refresh_ocr_status()
 
     def _build_terms_page(self) -> QWidget:
@@ -1346,6 +1350,54 @@ class MainWindow(QMainWindow):
             "下载更新失败",
             f"{message}\n\n应用仍可正常使用。",
         )
+
+    def _build_stats_page(self) -> QWidget:
+        page = _page()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 10, 20, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.addWidget(_page_title("统计"))
+        header.addStretch(1)
+        self.stats_summary_label = QLabel("")
+        self.stats_summary_label.setStyleSheet(f"color:{MUTED}; font-size:{FONT_MICRO};")
+        header.addWidget(self.stats_summary_label)
+        layout.addLayout(header)
+
+        heat_card = _card()
+        heat_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        heat_layout = QVBoxLayout(heat_card)
+        heat_layout.setContentsMargins(12, 8, 12, 10)
+        heat_layout.setSpacing(4)
+        heat_layout.addWidget(_field_title("活跃度（近 90 天）"))
+        self.activity_heatmap = ActivityHeatmap()
+        heat_layout.addWidget(self.activity_heatmap, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(heat_card)
+
+        donut_card = _card()
+        donut_card.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        donut_layout = QVBoxLayout(donut_card)
+        donut_layout.setContentsMargins(12, 8, 12, 10)
+        donut_layout.setSpacing(4)
+        donut_layout.addWidget(_field_title("分类构成"))
+        self.category_donut = CategoryDonut()
+        donut_layout.addWidget(self.category_donut)
+        layout.addWidget(donut_card)
+
+        layout.addStretch(1)
+        return page
+
+    def refresh_stats(self) -> None:
+        stats = self.history_store.get_statistics()
+        daily = stats.get("daily_activity", {})
+        self.activity_heatmap.set_data(daily)
+        self.category_donut.set_data(stats.get("category_distribution", {}))
+        streak = learning_streak(daily)
+        parts = [f"累计 {stats.get('total_captures', 0)} 条记录"]
+        if streak > 0:
+            parts.append(f"连续学习 {streak} 天")
+        self.stats_summary_label.setText(" · ".join(parts))
 
     def _build_settings_page(self) -> QWidget:
         page = _page()

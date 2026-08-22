@@ -28,6 +28,12 @@ DANGER_SOFT = "#FFF5F5"      # 危险浅底
 DANGER_BORDER = "#FECACA"    # 危险边框
 SUCCESS = "#16A34A"          # 成功
 
+# ---- 图表色板 ----
+# 热力图：PRIMARY 蓝的 5 级强度（0=空格子，1-4 由浅到深）
+CHART_HEAT_LEVELS = ["#EEF1F4", "#DBEAFE", "#93C5FD", "#3B82F6", "#1D4ED8"]
+# 分类图：主色打头的中性调和色，最后一档为"其他"的灰
+CHART_CATEGORICAL = ["#3B82F6", "#16A34A", "#F59E0B", "#8B5CF6", "#06B6D4", "#98A2B3"]
+
 # ---- 圆角 ----
 RADIUS_SM = "6px"            # 输入框、小控件
 RADIUS_MD = "8px"            # 按钮、列表项
