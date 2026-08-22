@@ -694,7 +694,7 @@ def test_sidebar_navigation_order_and_screenshot_action(tmp_path, monkeypatch) -
 
     window = main_window_module.MainWindow()
     labels = [button.text() for button in window.nav_buttons]
-    assert labels == ["获取", "学习", "术语本", "工作台", "设置"]
+    assert labels == ["获取", "学习", "术语本", "工作台", "统计", "设置"]
     assert not hasattr(window, "terms_add_button")
     assert not hasattr(window, "terms_review_button")
     assert not hasattr(window, "_terms_view_buttons")
